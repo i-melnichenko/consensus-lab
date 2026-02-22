@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package raft.v1;
+
+option go_package = "pkg/proto/raftv1;raftpb";
+
+// RaftService defines the Raft RPCs used for leader election and replication.
+service RaftService {
+  // RequestVote is used by candidates to ask peers for a vote in a term.
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+
+  // AppendEntries replicates log entries and also acts as a heartbeat.
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // InstallSnapshot sends a compacted state snapshot to a follower.
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}
+
+// RequestVoteRequest is sent by a candidate during leader election.
+message RequestVoteRequest {
+  // Candidate's current term.
+  int64 term = 1;
+  // Candidate node identifier.
+  string candidate_id = 2;
+  // Index of candidate's last log entry.
+  int64 last_log_index = 3;
+  // Term of candidate's last log entry.
+  int64 last_log_term = 4;
+}
+
+// RequestVoteResponse is a peer response to RequestVote.
+message RequestVoteResponse {
+  // Responder's current term (used by candidate to step down if higher).
+  int64 term = 1;
+  // True if the vote was granted to the candidate.
+  bool vote_granted = 2;
+}
+
+// LogEntry is a single replicated command stored in the Raft log.
+message LogEntry {
+  // Term when the entry was created by the leader.
+  int64 term = 1;
+  // Opaque command payload for the state machine.
+  bytes command = 2;
+}
+
+// AppendEntriesRequest is sent by the leader to replicate log entries.
+message AppendEntriesRequest {
+  // Leader's current term.
+  int64 term = 1;
+  // Leader node identifier.
+  string leader_id = 2;
+  // Index of log entry immediately preceding new ones.
+  int64 prev_log_index = 3;
+  // Term of prev_log_index entry.
+  int64 prev_log_term = 4;
+  // Entries to append; empty for heartbeat.
+  repeated LogEntry entries = 5;
+  // Leader's commit index.
+  int64 leader_commit = 6;
+}
+
+// AppendEntriesResponse is a follower response to AppendEntries.
+message AppendEntriesResponse {
+  // Follower's current term.
+  int64 term = 1;
+  // True if the append/heartbeat was accepted.
+  bool success = 2;
+  // First index to retry from when append fails due to log conflict.
+  int64 conflict_index = 3;
+  // Conflicting term on follower side; 0 if unavailable.
+  int64 conflict_term = 4;
+}
+
+// ClusterConfig stores the current cluster membership.
+message ClusterConfig {
+  // Node identifiers participating in the cluster.
+  repeated string members = 1;
+}
+
+// InstallSnapshotRequest transfers a full snapshot to a lagging follower.
+message InstallSnapshotRequest {
+  // Leader's current term.
+  int64 term = 1;
+  // Leader node identifier.
+  string leader_id = 2;
+  // Snapshot replaces log entries up to and including this index.
+  int64 last_included_index = 3;
+  // Term of last_included_index.
+  int64 last_included_term = 4;
+  // Cluster membership captured in the snapshot.
+  ClusterConfig config = 5;
+  // Serialized snapshot bytes.
+  bytes data = 6;
+}
+
+// InstallSnapshotResponse acknowledges snapshot installation.
+message InstallSnapshotResponse {
+  // Follower's current term.
+  int64 term = 1;
+}

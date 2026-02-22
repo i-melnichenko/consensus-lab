@@ -1,0 +1,56 @@
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.26"
+  tests: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+    - gofumpt
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/i-melnichenko/consensus-lab
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - gocritic
+    - nakedret
+    - gosec
+    - prealloc
+  settings:
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: blank-imports
+        - name: indent-error-flow
+        - name: errorf
+        - name: range-val-in-closure
+        - name: early-return
+    gocritic:
+      disabled-checks:
+        - commentFormatting
+    nakedret:
+      max-func-lines: 20
+    gosec:
+      excludes:
+        - G104
+        - G601
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec

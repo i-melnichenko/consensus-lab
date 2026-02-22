@@ -1,0 +1,18 @@
+version: v2
+
+modules:
+  - path: api/proto/kv
+  - path: api/proto/raft
+
+deps:
+  - buf.build/googleapis/googleapis
+
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+
+breaking:
+  use:
+    - FILE

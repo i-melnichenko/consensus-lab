@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package kv.v1;
+
+option go_package = "pkg/proto/kvv1;kvpb";
+
+// KVService provides a simple replicated key-value API.
+service KVService {
+  // Put stores or overwrites a key.
+  rpc Put(PutRequest) returns (PutResponse);
+  // Get returns a value by key.
+  rpc Get(GetRequest) returns (GetResponse);
+  // Delete removes a key.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+// PutRequest writes a value for the given key.
+message PutRequest {
+  // Application key.
+  string key = 1;
+  // Value to persist.
+  string value = 2;
+}
+
+// PutResponse contains metadata about the committed write.
+message PutResponse {
+  // Consensus log index assigned to the write.
+  int64 index = 1;
+}
+
+// GetRequest fetches the current value for a key.
+message GetRequest {
+  // Application key.
+  string key = 1;
+}
+
+// GetResponse returns the lookup result.
+message GetResponse {
+  // True if the key exists.
+  bool found = 1;
+  // Value for the key when found is true.
+  string value = 2;
+}
+
+// DeleteRequest removes a key from the store.
+message DeleteRequest {
+  // Application key.
+  string key = 1;
+}
+
+// DeleteResponse contains metadata about the committed delete.
+message DeleteResponse {
+  // Consensus log index assigned to the delete.
+  int64 index = 1;
+}
