@@ -125,6 +125,42 @@ go build ./...
 go test ./...
 ```
 
+## Benchmarking
+
+Run the local benchmark suite against a 3-node Docker cluster:
+
+```bash
+docker compose up --build
+./benchmark.sh
+```
+
+Run a single benchmark:
+
+```bash
+./benchmark.sh write_latency
+./benchmark.sh read_latency
+./benchmark.sh failover_time
+./benchmark.sh stale_reads
+./benchmark.sh slow_follower_recovery
+```
+
+The script measures:
+
+- sequential write latency
+- follower-distributed read latency
+- parallel write throughput
+- leader failover time
+- stale follower reads (demonstrates non-linearizable follower reads without ReadIndex)
+- slow follower pause/resume recovery time (log backfill)
+
+Results are written to `.bench-results/*.txt`.
+
+Notes:
+
+- Numbers are highly environment-dependent (laptop model, Docker runtime, local CPU load, background processes).
+- Tail latency (`p95`/`p99`) can vary noticeably between runs because of scheduler jitter and GC.
+- Benchmarks include simple retries for some setup writes to reduce flaky failures during transient leader changes.
+
 ## Requirements
 
 - Go 1.26+

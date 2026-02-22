@@ -7,7 +7,7 @@ import (
 )
 
 func (n *Node) runFollower(ctx context.Context) {
-	timer := time.NewTimer(randomElectionTimeout())
+	timer := n.newTimer(n.electionTimeoutFn())
 	defer timer.Stop()
 
 	resetCh := n.electionTimeoutResetSignal()
@@ -19,12 +19,12 @@ func (n *Node) runFollower(ctx context.Context) {
 		case <-resetCh:
 			if !timer.Stop() {
 				select {
-				case <-timer.C:
+				case <-timer.C():
 				default:
 				}
 			}
-			timer.Reset(randomElectionTimeout())
-		case <-timer.C:
+			timer.Reset(n.electionTimeoutFn())
+		case <-timer.C():
 			n.mu.Lock()
 			n.logger.Debug("election timeout fired, converting to candidate",
 				"node_id", n.id,
@@ -67,7 +67,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 	votes := 1
 	majority := n.quorumSize()
 
-	timer := time.NewTimer(randomElectionTimeout())
+	timer := n.newTimer(n.electionTimeoutFn())
 	defer timer.Stop()
 
 	voteCh := make(chan *RequestVoteResponse, len(n.peers))
@@ -109,7 +109,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-timer.C:
+		case <-timer.C():
 			n.logger.Debug("election timed out, restarting",
 				"node_id", n.id,
 				"term", term,

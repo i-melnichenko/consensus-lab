@@ -11,6 +11,7 @@ package raft
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 )
@@ -61,6 +62,11 @@ type Node struct {
 
 	applyCh chan consensus.ApplyMsg
 	logger  Logger
+
+	newTimer          timerFactory
+	newTicker         tickerFactory
+	electionTimeoutFn electionTimeoutFunc
+	heartbeatInterval time.Duration
 }
 
 // NewNode creates a Raft node and restores persisted state from storage.
@@ -99,6 +105,10 @@ func NewNode(
 		replicateNotifyCh:      make(chan struct{}, 1),
 		applyCh:                applyCh,
 		logger:                 logger,
+		newTimer:               defaultTimerFactory,
+		newTicker:              defaultTickerFactory,
+		electionTimeoutFn:      randomElectionTimeout,
+		heartbeatInterval:      50 * time.Millisecond,
 	}
 
 	ps, err := storage.Load()

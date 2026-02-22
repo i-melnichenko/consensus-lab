@@ -2,3 +2,4 @@
 .gocache
 .claude
 var/
+.bench-results

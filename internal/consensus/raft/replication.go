@@ -2,7 +2,6 @@ package raft
 
 import (
 	"context"
-	"time"
 )
 
 func (n *Node) runLeader(ctx context.Context) {
@@ -11,7 +10,7 @@ func (n *Node) runLeader(ctx context.Context) {
 		"term", n.currentTerm,
 	)
 
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := n.newTicker(n.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -19,7 +18,7 @@ func (n *Node) runLeader(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-n.replicateNotifyCh:
-		case <-ticker.C:
+		case <-ticker.C():
 		}
 
 		for peer, peerClient := range n.peers {

@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -198,5 +199,175 @@ loop:
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("runFollower did not stop after context cancellation")
+	}
+}
+
+func TestNode_runCandidate_WinsDespiteDroppedVoteRPC(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	droppedPeer := NewMockPeerClient(ctrl)
+	droppedPeer.EXPECT().
+		RequestVote(gomock.Any(), gomock.Any()).
+		Return(nil, errors.New("dropped rpc")).
+		AnyTimes()
+
+	grantPeer := NewMockPeerClient(ctrl)
+	grantPeer.EXPECT().
+		RequestVote(gomock.Any(), gomock.Any()).
+		Return(&RequestVoteResponse{Term: 2, VoteGranted: true}, nil).
+		Times(1)
+
+	n := newTestNode("n1", map[string]PeerClient{
+		"n2": droppedPeer,
+		"n3": grantPeer,
+	}, make(chan consensus.ApplyMsg))
+	n.role = Candidate
+	n.currentTerm = 1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	n.runCandidate(ctx)
+
+	if n.role != Leader {
+		t.Fatalf("expected role %v, got %v", Leader, n.role)
+	}
+	if n.currentTerm != 2 {
+		t.Fatalf("expected currentTerm=2, got %d", n.currentTerm)
+	}
+}
+
+func TestNode_runCandidate_StopsOnContextCancellationWithSlowPeers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	slowPeer1 := NewMockPeerClient(ctrl)
+	slowPeer1.EXPECT().
+		RequestVote(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _ *RequestVoteRequest) (*RequestVoteResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}).
+		Times(1)
+
+	slowPeer2 := NewMockPeerClient(ctrl)
+	slowPeer2.EXPECT().
+		RequestVote(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _ *RequestVoteRequest) (*RequestVoteResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}).
+		Times(1)
+
+	n := newTestNode("n1", map[string]PeerClient{
+		"n2": slowPeer1,
+		"n3": slowPeer2,
+	}, make(chan consensus.ApplyMsg))
+	n.role = Candidate
+	n.currentTerm = 5
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	n.runCandidate(ctx)
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatal("runCandidate did not stop promptly after context cancellation")
+	}
+
+	if n.role != Candidate {
+		t.Fatalf("expected role to remain %v, got %v", Candidate, n.role)
+	}
+	if n.currentTerm != 6 {
+		t.Fatalf("expected currentTerm=6 after election start, got %d", n.currentTerm)
+	}
+}
+
+func TestNode_runFollower_BecomesCandidateOnTimeout_DeterministicTimer(t *testing.T) {
+	n := newTestNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg))
+	n.role = Follower
+
+	tf := newFakeTimerFactory()
+	ft := tf.AddTimer()
+	n.newTimer = tf.NewTimer
+	n.electionTimeoutFn = func() time.Duration { return 123 * time.Millisecond }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.runFollower(ctx)
+	}()
+
+	ft.Fire()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("follower did not exit after fake timer fired")
+	}
+
+	n.mu.Lock()
+	role := n.role
+	n.mu.Unlock()
+	if role != Candidate {
+		t.Fatalf("expected role %v, got %v", Candidate, role)
+	}
+
+	if got := tf.CreatedDurations(); len(got) != 1 || got[0] != 123*time.Millisecond {
+		t.Fatalf("unexpected timer durations: %v", got)
+	}
+}
+
+func TestNode_runFollower_ResetsTimeoutOnSignal_DeterministicTimer(t *testing.T) {
+	n := newTestNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg))
+	n.role = Follower
+
+	tf := newFakeTimerFactory()
+	ft := tf.AddTimer()
+	n.newTimer = tf.NewTimer
+
+	timeoutCalls := 0
+	n.electionTimeoutFn = func() time.Duration {
+		timeoutCalls++
+		return time.Duration(100+timeoutCalls) * time.Millisecond
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.runFollower(ctx)
+	}()
+
+	n.resetElectionTimeout()
+	n.resetElectionTimeout()
+
+	// Allow runFollower to process reset signals.
+	time.Sleep(10 * time.Millisecond)
+
+	// Reset signals are coalesced via a buffered channel, so multiple back-to-back
+	// calls may collapse into a single observed reset.
+	if got := ft.ResetCount(); got < 1 {
+		t.Fatalf("expected at least 1 timer reset, got %d", got)
+	}
+
+	n.mu.Lock()
+	role := n.role
+	n.mu.Unlock()
+	if role != Follower {
+		t.Fatalf("expected role %v before timeout fires, got %v", Follower, role)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("runFollower did not stop after cancellation")
 	}
 }
