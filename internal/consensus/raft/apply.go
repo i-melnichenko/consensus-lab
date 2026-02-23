@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"time"
 
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 )
@@ -55,6 +56,7 @@ func (n *Node) runApplyLoop(ctx context.Context) {
 			if snap.LastIncludedIndex > n.lastApplied {
 				n.lastApplied = snap.LastIncludedIndex
 			}
+			n.lastAppliedAt = time.Now()
 			n.mu.Unlock()
 		}
 
@@ -90,6 +92,9 @@ func (n *Node) runApplyLoop(ctx context.Context) {
 				Command:      append([]byte(nil), entry.Command...),
 				CommandIndex: nextIndex,
 			}:
+				n.mu.Lock()
+				n.lastAppliedAt = time.Now()
+				n.mu.Unlock()
 			}
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 	"github.com/i-melnichenko/consensus-lab/internal/service"
 	kvgrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/kv"
+	adminpb "github.com/i-melnichenko/consensus-lab/pkg/proto/adminv1"
 	kvpb "github.com/i-melnichenko/consensus-lab/pkg/proto/kvv1"
 	raftpb "github.com/i-melnichenko/consensus-lab/pkg/proto/raftv1"
 )
@@ -32,6 +33,7 @@ type App struct {
 	consensus consensus.Consensus
 	kv        *service.KV
 	raftSrv   raftpb.RaftServiceServer
+	adminSrv  adminpb.AdminServiceServer
 }
 
 // New validates dependencies and constructs a runnable application.
@@ -41,6 +43,7 @@ func New(
 	c consensus.Consensus,
 	kvSvc *service.KV,
 	raftSrv raftpb.RaftServiceServer,
+	adminSrv adminpb.AdminServiceServer,
 ) (*App, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -57,12 +60,16 @@ func New(
 	if raftSrv == nil {
 		return nil, fmt.Errorf("app: nil raft server")
 	}
+	if adminSrv == nil {
+		return nil, fmt.Errorf("app: nil admin server")
+	}
 	return &App{
 		config:    cfg,
 		logger:    logger,
 		consensus: c,
 		kv:        kvSvc,
 		raftSrv:   raftSrv,
+		adminSrv:  adminSrv,
 	}, nil
 }
 
@@ -87,27 +94,37 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	defer func() { _ = consensusLis.Close() }()
 
+	adminLis, err := net.Listen("tcp", a.config.AdminGRPCAddr)
+	if err != nil {
+		return fmt.Errorf("listen admin grpc %s: %w", a.config.AdminGRPCAddr, err)
+	}
+	defer func() { _ = adminLis.Close() }()
+
 	a.logger.Info(
 		"node started",
 		"node_id", a.config.NodeID,
 		"consensus_type", a.config.ConsensusType,
 		"kv_grpc_addr", a.config.KVGRPCAddr,
+		"admin_grpc_addr", a.config.AdminGRPCAddr,
 		"consensus_grpc_addr", a.config.ConsensusGRPCAddr,
 	)
 
-	return a.serve(ctx, kvLis, consensusLis)
+	return a.serve(ctx, kvLis, adminLis, consensusLis)
 }
 
 // serve registers gRPC services, starts goroutines, and blocks until ctx is
 // canceled or a fatal error occurs.
-func (a *App) serve(ctx context.Context, kvLis, raftLis net.Listener) error {
+func (a *App) serve(ctx context.Context, kvLis, adminLis, raftLis net.Listener) error {
 	kvServer := grpc.NewServer()
 	kvpb.RegisterKVServiceServer(kvServer, kvgrpc.NewServer(a.kv))
+
+	adminServer := grpc.NewServer()
+	adminpb.RegisterAdminServiceServer(adminServer, a.adminSrv)
 
 	raftServer := grpc.NewServer()
 	raftpb.RegisterRaftServiceServer(raftServer, a.raftSrv)
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 
 	go func() {
 		if err := a.kv.RunApplyLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -120,6 +137,11 @@ func (a *App) serve(ctx context.Context, kvLis, raftLis net.Listener) error {
 		}
 	}()
 	go func() {
+		if err := adminServer.Serve(adminLis); err != nil {
+			errCh <- fmt.Errorf("admin grpc serve: %w", err)
+		}
+	}()
+	go func() {
 		if err := raftServer.Serve(raftLis); err != nil {
 			errCh <- fmt.Errorf("consensus grpc serve: %w", err)
 		}
@@ -128,10 +150,12 @@ func (a *App) serve(ctx context.Context, kvLis, raftLis net.Listener) error {
 	select {
 	case <-ctx.Done():
 		raftServer.GracefulStop()
+		adminServer.GracefulStop()
 		kvServer.GracefulStop()
 		return nil
 	case err := <-errCh:
 		raftServer.Stop()
+		adminServer.Stop()
 		kvServer.Stop()
 		return err
 	}

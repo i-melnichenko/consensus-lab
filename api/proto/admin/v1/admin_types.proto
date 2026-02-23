@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package admin.v1;
+
+option go_package = "pkg/proto/adminv1;adminpb";
+
+// ConsensusType identifies which consensus algorithm the node is running.
+enum ConsensusType {
+  CONSENSUS_TYPE_UNSPECIFIED = 0;
+  CONSENSUS_TYPE_RAFT = 1;
+}
+
+// NodeRole describes the node role in the cluster.
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  NODE_ROLE_LEADER = 1;
+  NODE_ROLE_FOLLOWER = 2;
+  NODE_ROLE_CANDIDATE = 3;
+  NODE_ROLE_LEARNER = 4;
+}
+
+// NodeStatus reflects the current health/lifecycle state of the node.
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  NODE_STATUS_STARTING = 1;
+  NODE_STATUS_HEALTHY = 2;
+  NODE_STATUS_DEGRADED = 3;
+  NODE_STATUS_UNAVAILABLE = 4;
+  NODE_STATUS_STOPPING = 5;
+  NODE_STATUS_STOPPED = 6;
+}
+
+// PeerInfo contains basic information about a peer node.
+message PeerInfo {
+  // Peer node identifier.
+  string node_id = 1;
+  // Optional peer address (host:port).
+  string address = 2;
+}

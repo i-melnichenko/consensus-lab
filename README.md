@@ -1,8 +1,9 @@
 # consensus-lab
 
-Raft-backed distributed KV store in Go. A `cmd/node` process exposes two gRPC APIs:
+Raft-backed distributed KV store in Go. A `cmd/node` process exposes three gRPC APIs:
 
 - KV API (`kv.v1.KVService`) — client reads/writes
+- Admin API (`admin.v1.AdminService`) — node/cluster diagnostics (`GetNodeInfo`)
 - Raft API (`raft.v1.RaftService`) — consensus peer traffic
 
 ## Implementation Status
@@ -28,19 +29,21 @@ Raft-backed distributed KV store in Go. A `cmd/node` process exposes two gRPC AP
 
 ## Quick Start (Docker)
 
-Run a 3-node Raft cluster with a single command:
+Run a local Raft cluster with a single command:
 
 ```bash
 docker compose up --build
 ```
 
-Nodes expose their KV API on the host:
+Docker Compose starts 5 nodes. Host ports:
 
-| Node   | KV gRPC |
-|--------|---------|
-| node-1 | `:8081` |
-| node-2 | `:8082` |
-| node-3 | `:8083` |
+| Node   | KV gRPC | Admin gRPC |
+|--------|---------|------------|
+| node-1 | `:8081` | `:8091` |
+| node-2 | `:8082` | `:8092` |
+| node-3 | `:8083` | `:8093` |
+| node-4 | `:8084` | `:8094` |
+| node-5 | `:8085` | `:8095` |
 
 ## CLI Client
 
@@ -48,6 +51,7 @@ Nodes expose their KV API on the host:
 
 - **get** — picks a random node (distributes reads across replicas)
 - **put / delete** — tries all nodes until the leader accepts the write
+- **admin** — polls each admin endpoint and renders a live table (refresh every 1s)
 
 ```bash
 # point at the whole cluster — leader discovery is automatic
@@ -57,13 +61,16 @@ go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083 delete f
 
 # single node still works
 go run ./cmd/client --addr localhost:8081 get foo
+
+# live admin dashboard (use Admin gRPC ports)
+go run ./cmd/client --addr localhost:8091,localhost:8092,localhost:8093 admin
 ```
 
 Flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--addr` | `localhost:8080` | Comma-separated KV gRPC addresses |
+| `--addr` | `localhost:8080` | Comma-separated gRPC addresses for the selected mode (KV or Admin) |
 | `--timeout` | `5s` | Request timeout |
 
 ## Run Node Manually
@@ -76,6 +83,7 @@ Environment variables:
 | `APP_CONSENSUS_TYPE` | must be `raft` |
 | `APP_LOG_LEVEL` | `debug\|info\|warn\|error` |
 | `APP_KV_GRPC_ADDR` | KV gRPC listen address |
+| `APP_ADMIN_GRPC_ADDR` | Admin gRPC listen address |
 | `APP_CONSENSUS_GRPC_ADDR` | Raft gRPC listen address |
 | `APP_DATA_DIR` | Local Raft storage directory |
 | `APP_PEERS` | Comma-separated peers (`id=host:port` or `host:port`). The node's own ID is ignored, so the full cluster list can be used on every node. |
@@ -87,19 +95,19 @@ Environment variables:
 # All three nodes share the same APP_PEERS list — the node removes itself automatically.
 
 # terminal 1
-APP_NODE_ID=node-1 APP_KV_GRPC_ADDR=:8081 APP_CONSENSUS_GRPC_ADDR=:9091 \
+APP_NODE_ID=node-1 APP_KV_GRPC_ADDR=:8081 APP_ADMIN_GRPC_ADDR=:8091 APP_CONSENSUS_GRPC_ADDR=:9091 \
 APP_DATA_DIR=./var/node-1 \
 APP_PEERS=node-1=:9091,node-2=:9092,node-3=:9093 \
 go run ./cmd/node
 
 # terminal 2
-APP_NODE_ID=node-2 APP_KV_GRPC_ADDR=:8082 APP_CONSENSUS_GRPC_ADDR=:9092 \
+APP_NODE_ID=node-2 APP_KV_GRPC_ADDR=:8082 APP_ADMIN_GRPC_ADDR=:8092 APP_CONSENSUS_GRPC_ADDR=:9092 \
 APP_DATA_DIR=./var/node-2 \
 APP_PEERS=node-1=:9091,node-2=:9092,node-3=:9093 \
 go run ./cmd/node
 
 # terminal 3
-APP_NODE_ID=node-3 APP_KV_GRPC_ADDR=:8083 APP_CONSENSUS_GRPC_ADDR=:9093 \
+APP_NODE_ID=node-3 APP_KV_GRPC_ADDR=:8083 APP_ADMIN_GRPC_ADDR=:8093 APP_CONSENSUS_GRPC_ADDR=:9093 \
 APP_DATA_DIR=./var/node-3 \
 APP_PEERS=node-1=:9091,node-2=:9092,node-3=:9093 \
 go run ./cmd/node
@@ -127,7 +135,7 @@ go test ./...
 
 ## Benchmarking
 
-Run the local benchmark suite against a 3-node Docker cluster:
+Run the local benchmark suite against the local Docker cluster:
 
 ```bash
 docker compose up --build

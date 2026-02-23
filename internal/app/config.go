@@ -22,6 +22,7 @@ type Config struct {
 	LogLevel      string
 
 	KVGRPCAddr        string
+	AdminGRPCAddr     string
 	ConsensusGRPCAddr string
 	DataDir           string
 
@@ -39,6 +40,7 @@ func DefaultConfig() Config {
 		ConsensusType:     ConsensusTypeRaft,
 		LogLevel:          "info",
 		KVGRPCAddr:        ":8080",
+		AdminGRPCAddr:     ":8090",
 		ConsensusGRPCAddr: ":9090",
 		DataDir:           "./var/node-1",
 	}
@@ -51,6 +53,7 @@ func DefaultConfig() Config {
 // - APP_CONSENSUS_TYPE (must be "raft")
 // - APP_LOG_LEVEL (debug|info|warn|error)
 // - APP_KV_GRPC_ADDR
+// - APP_ADMIN_GRPC_ADDR
 // - APP_CONSENSUS_GRPC_ADDR
 // - APP_DATA_DIR
 // - APP_PEERS (comma-separated addresses)
@@ -69,6 +72,9 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	if v := strings.TrimSpace(os.Getenv("APP_KV_GRPC_ADDR")); v != "" {
 		cfg.KVGRPCAddr = v
+	}
+	if v := strings.TrimSpace(os.Getenv("APP_ADMIN_GRPC_ADDR")); v != "" {
+		cfg.AdminGRPCAddr = v
 	}
 	if v := strings.TrimSpace(os.Getenv("APP_CONSENSUS_GRPC_ADDR")); v != "" {
 		cfg.ConsensusGRPCAddr = v
@@ -110,6 +116,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.KVGRPCAddr) == "" {
 		return fmt.Errorf("app: kv grpc addr is required")
+	}
+	if strings.TrimSpace(c.AdminGRPCAddr) == "" {
+		return fmt.Errorf("app: admin grpc addr is required")
 	}
 	if strings.TrimSpace(c.ConsensusGRPCAddr) == "" {
 		return fmt.Errorf("app: consensus grpc addr is required")
