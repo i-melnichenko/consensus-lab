@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -76,6 +77,9 @@ func (c *Client) Delete(ctx context.Context, key string) (index int64, err error
 //   - Put / Delete: tries all nodes until the leader accepts the write.
 type ClusterClient struct {
 	clients []*Client
+
+	mu         sync.RWMutex
+	leaderHint int // -1 means unknown
 }
 
 // DialCluster connects to all provided addresses and returns a ClusterClient.
@@ -96,7 +100,10 @@ func DialCluster(addrs []string, opts ...grpc.DialOption) (*ClusterClient, error
 		}
 		clients = append(clients, c)
 	}
-	return &ClusterClient{clients: clients}, nil
+	return &ClusterClient{
+		clients:    clients,
+		leaderHint: -1,
+	}, nil
 }
 
 // Close closes all underlying node client connections.
@@ -142,12 +149,14 @@ func (c *ClusterClient) Delete(ctx context.Context, key string) (int64, error) {
 // writeToLeader tries each node in random order until one accepts the write.
 // Nodes that respond with ErrNotLeader are skipped.
 func (c *ClusterClient) writeToLeader(ctx context.Context, fn func(*Client) (int64, error)) (int64, error) {
-	for _, i := range rand.Perm(len(c.clients)) {
+	for _, i := range c.writeOrder() {
 		index, err := fn(c.clients[i])
 		if err == nil {
+			c.setLeaderHint(i)
 			return index, nil
 		}
 		if errors.Is(err, ErrNotLeader) {
+			c.clearLeaderHintIf(i)
 			continue
 		}
 		if ctx.Err() != nil {
@@ -156,6 +165,44 @@ func (c *ClusterClient) writeToLeader(ctx context.Context, fn func(*Client) (int
 		// Network or server error — try next node.
 	}
 	return 0, ErrNoLeader
+}
+
+func (c *ClusterClient) writeOrder() []int {
+	n := len(c.clients)
+	order := make([]int, 0, n)
+
+	hint := c.getLeaderHint()
+	if hint >= 0 && hint < n {
+		order = append(order, hint)
+	}
+
+	for _, i := range rand.Perm(n) {
+		if i == hint {
+			continue
+		}
+		order = append(order, i)
+	}
+	return order
+}
+
+func (c *ClusterClient) getLeaderHint() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.leaderHint
+}
+
+func (c *ClusterClient) setLeaderHint(i int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.leaderHint = i
+}
+
+func (c *ClusterClient) clearLeaderHintIf(i int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.leaderHint == i {
+		c.leaderHint = -1
+	}
 }
 
 func fromGRPCStatus(err error) error {

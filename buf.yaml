@@ -3,6 +3,7 @@ version: v2
 modules:
   - path: api/proto/kv
   - path: api/proto/raft
+  - path: api/proto/admin
 
 deps:
   - buf.build/googleapis/googleapis

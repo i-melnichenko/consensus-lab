@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package admin.v1;
+
+option go_package = "pkg/proto/adminv1;adminpb";
+
+import "v1/admin_node.proto";
+
+// AdminService provides administrative cluster/node APIs.
+service AdminService {
+  // GetNodeInfo returns administrative information about the current node.
+  rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
+}
+
+// GetNodeInfoRequest requests info about the current node.
+message GetNodeInfoRequest {}
+
+// GetNodeInfoResponse contains administrative node information.
+message GetNodeInfoResponse {
+  // Current node information.
+  NodeInfo node = 1;
+}

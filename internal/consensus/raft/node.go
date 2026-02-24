@@ -43,8 +43,9 @@ type Node struct {
 	// pendingSnapshot is set when a snapshot needs to be delivered to the apply channel.
 	pendingSnapshot *Snapshot
 
-	commitIndex int64
-	lastApplied int64
+	commitIndex   int64
+	lastApplied   int64
+	lastAppliedAt time.Time
 
 	// config is the active cluster configuration (source of quorum).
 	// In the current implementation it is static at runtime and restored from

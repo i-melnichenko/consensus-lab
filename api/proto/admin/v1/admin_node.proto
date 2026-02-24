@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package admin.v1;
+
+option go_package = "pkg/proto/adminv1;adminpb";
+
+import "v1/admin_types.proto";
+import "v1/admin_raft.proto";
+
+// NodeInfo contains administrative information about the current node.
+message NodeInfo {
+  // NodeID
+  string node_id = 1;
+  // ConsensusType
+  ConsensusType consensus_type = 2;
+  // Role
+  NodeRole role = 3;
+  // Status
+  NodeStatus status = 4;
+  // Peers
+  repeated PeerInfo peers = 5;
+  // Consensus-specific details.
+  oneof consensus_details {
+    RaftNodeInfo raft = 6;
+  }
+}

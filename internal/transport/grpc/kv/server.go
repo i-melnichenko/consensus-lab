@@ -15,8 +15,8 @@ import (
 // *service.KV satisfies this interface.
 type Handler interface {
 	Get(key string) (string, bool)
-	Put(key, value string) (int64, error)
-	Delete(key string) (int64, error)
+	Put(ctx context.Context, key, value string) (int64, error)
+	Delete(ctx context.Context, key string) (int64, error)
 }
 
 // Server implements kvpb.KVServiceServer by delegating to a KV service.
@@ -31,8 +31,8 @@ func NewServer(handler Handler) *Server {
 }
 
 // Put handles a KV Put RPC.
-func (s *Server) Put(_ context.Context, req *kvpb.PutRequest) (*kvpb.PutResponse, error) {
-	index, err := s.handler.Put(req.Key, req.Value)
+func (s *Server) Put(ctx context.Context, req *kvpb.PutRequest) (*kvpb.PutResponse, error) {
+	index, err := s.handler.Put(ctx, req.Key, req.Value)
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -49,8 +49,8 @@ func (s *Server) Get(_ context.Context, req *kvpb.GetRequest) (*kvpb.GetResponse
 }
 
 // Delete handles a KV Delete RPC.
-func (s *Server) Delete(_ context.Context, req *kvpb.DeleteRequest) (*kvpb.DeleteResponse, error) {
-	index, err := s.handler.Delete(req.Key)
+func (s *Server) Delete(ctx context.Context, req *kvpb.DeleteRequest) (*kvpb.DeleteResponse, error) {
+	index, err := s.handler.Delete(ctx, req.Key)
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -60,6 +60,9 @@ func (s *Server) Delete(_ context.Context, req *kvpb.DeleteRequest) (*kvpb.Delet
 func toGRPCStatus(err error) error {
 	if errors.Is(err, service.ErrNotLeader) {
 		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if errors.Is(err, service.ErrCommitTimeout) {
+		return status.Error(codes.Unavailable, err.Error())
 	}
 	return status.Error(codes.Internal, err.Error())
 }

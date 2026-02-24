@@ -194,6 +194,12 @@ func (n *Node) sendAppendEntries(
 		if n.nextIndex[peerID] < 1 {
 			n.nextIndex[peerID] = 1
 		}
+		// A rejection must backtrack progress. Some conflict hints (notably a
+		// snapshot-boundary mismatch returning conflictIndex == prevNext) can
+		// otherwise leave nextIndex unchanged and cause a hot retry loop.
+		if n.nextIndex[peerID] >= prevNext && prevNext > 1 {
+			n.nextIndex[peerID] = prevNext - 1
+		}
 		n.logger.Debug("AppendEntries rejected, backing off nextIndex",
 			"node_id", n.id,
 			"peer", peerID,

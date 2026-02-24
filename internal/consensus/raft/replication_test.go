@@ -137,6 +137,35 @@ func TestNode_sendAppendEntries_UsesConflictHintsForBacktracking(t *testing.T) {
 	}
 }
 
+func TestNode_sendAppendEntries_ForcesBackoffWhenConflictHintMakesNoProgress(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	peer := NewMockPeerClient(ctrl)
+	req := &AppendEntriesRequest{Term: 4}
+
+	peer.EXPECT().
+		AppendEntries(gomock.Any(), req).
+		Return(&AppendEntriesResponse{
+			Term:          4,
+			Success:       false,
+			ConflictTerm:  0,
+			ConflictIndex: 6, // same as current nextIndex: no progress without fallback
+		}, nil).
+		Times(1)
+
+	n := newTestNode("n1", map[string]PeerClient{"n2": peer}, make(chan consensus.ApplyMsg))
+	n.role = Leader
+	n.currentTerm = 4
+	n.nextIndex["n2"] = 6
+
+	n.sendAppendEntries(context.Background(), "n2", peer, req)
+
+	if got := n.nextIndex["n2"]; got != 5 {
+		t.Fatalf("expected nextIndex[n2]=5 after no-progress hint, got %d", got)
+	}
+}
+
 func TestNode_sendAppendEntries_AdvancesCommitIndexOnMajority(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

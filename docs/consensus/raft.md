@@ -158,6 +158,30 @@ Examples:
 - **Network partition**: only the partition with a majority can elect/keep a leader
 - **Delayed stale RPCs**: rejected by term checks
 
+## Membership Model in This Project (Important)
+
+This repository currently uses **static membership**.
+
+- the cluster member set is fixed at startup / restored state
+- runtime add/remove node reconfiguration is **not implemented**
+- failed nodes are **not removed automatically**
+
+Practical consequence:
+
+- quorum is calculated from the active Raft membership config, not from "currently reachable nodes"
+- if the config is `5` nodes, write quorum is `3`
+- if only `2/5` nodes are alive, writes stop (reads may still be possible depending on endpoint)
+
+This behavior is correct for Raft and preserves safety. Automatic removal of failed nodes without a proper reconfiguration protocol would be unsafe.
+
+### Quorum examples (static membership)
+
+- `1` node config → quorum `1` (writes require the only node)
+- `3` node config → quorum `2`
+- `5` node config → quorum `3`
+
+If you want writes to continue with only 2 live nodes, the membership must be explicitly reconfigured beforehand (for example to a `3`-node cluster with quorum `2`). Doing this safely requires membership change support (joint consensus or another correct reconfiguration approach).
+
 ### Where this is implemented
 
 - term checks and step-down behavior are enforced in RPC handlers and leader/candidate loops:

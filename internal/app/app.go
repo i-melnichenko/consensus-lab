@@ -8,10 +8,12 @@ import (
 	"net"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 	"github.com/i-melnichenko/consensus-lab/internal/service"
 	kvgrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/kv"
+	adminpb "github.com/i-melnichenko/consensus-lab/pkg/proto/adminv1"
 	kvpb "github.com/i-melnichenko/consensus-lab/pkg/proto/kvv1"
 	raftpb "github.com/i-melnichenko/consensus-lab/pkg/proto/raftv1"
 )
@@ -32,6 +34,7 @@ type App struct {
 	consensus consensus.Consensus
 	kv        *service.KV
 	raftSrv   raftpb.RaftServiceServer
+	adminSrv  adminpb.AdminServiceServer
 }
 
 // New validates dependencies and constructs a runnable application.
@@ -41,6 +44,7 @@ func New(
 	c consensus.Consensus,
 	kvSvc *service.KV,
 	raftSrv raftpb.RaftServiceServer,
+	adminSrv adminpb.AdminServiceServer,
 ) (*App, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -57,12 +61,16 @@ func New(
 	if raftSrv == nil {
 		return nil, fmt.Errorf("app: nil raft server")
 	}
+	if adminSrv == nil {
+		return nil, fmt.Errorf("app: nil admin server")
+	}
 	return &App{
 		config:    cfg,
 		logger:    logger,
 		consensus: c,
 		kv:        kvSvc,
 		raftSrv:   raftSrv,
+		adminSrv:  adminSrv,
 	}, nil
 }
 
@@ -71,43 +79,36 @@ func (a *App) Stop() {
 	a.consensus.Stop()
 }
 
-// Run starts consensus and gRPC servers and blocks until shutdown or fatal error.
+// Run starts consensus and a shared gRPC server and blocks until shutdown or fatal error.
 func (a *App) Run(ctx context.Context) error {
 	a.consensus.Run(ctx)
 
-	kvLis, err := net.Listen("tcp", a.config.KVGRPCAddr)
+	lis, err := net.Listen("tcp", a.config.GRPCAddr)
 	if err != nil {
-		return fmt.Errorf("listen kv grpc %s: %w", a.config.KVGRPCAddr, err)
+		return fmt.Errorf("listen grpc %s: %w", a.config.GRPCAddr, err)
 	}
-	defer func() { _ = kvLis.Close() }()
-
-	consensusLis, err := net.Listen("tcp", a.config.ConsensusGRPCAddr)
-	if err != nil {
-		return fmt.Errorf("listen consensus grpc %s: %w", a.config.ConsensusGRPCAddr, err)
-	}
-	defer func() { _ = consensusLis.Close() }()
+	defer func() { _ = lis.Close() }()
 
 	a.logger.Info(
 		"node started",
 		"node_id", a.config.NodeID,
 		"consensus_type", a.config.ConsensusType,
-		"kv_grpc_addr", a.config.KVGRPCAddr,
-		"consensus_grpc_addr", a.config.ConsensusGRPCAddr,
+		"grpc_addr", a.config.GRPCAddr,
 	)
 
-	return a.serve(ctx, kvLis, consensusLis)
+	return a.serve(ctx, lis)
 }
 
 // serve registers gRPC services, starts goroutines, and blocks until ctx is
 // canceled or a fatal error occurs.
-func (a *App) serve(ctx context.Context, kvLis, raftLis net.Listener) error {
-	kvServer := grpc.NewServer()
-	kvpb.RegisterKVServiceServer(kvServer, kvgrpc.NewServer(a.kv))
+func (a *App) serve(ctx context.Context, lis net.Listener) error {
+	server := grpc.NewServer()
+	kvpb.RegisterKVServiceServer(server, kvgrpc.NewServer(a.kv))
+	adminpb.RegisterAdminServiceServer(server, a.adminSrv)
+	raftpb.RegisterRaftServiceServer(server, a.raftSrv)
+	reflection.Register(server)
 
-	raftServer := grpc.NewServer()
-	raftpb.RegisterRaftServiceServer(raftServer, a.raftSrv)
-
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 
 	go func() {
 		if err := a.kv.RunApplyLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -115,24 +116,17 @@ func (a *App) serve(ctx context.Context, kvLis, raftLis net.Listener) error {
 		}
 	}()
 	go func() {
-		if err := kvServer.Serve(kvLis); err != nil {
-			errCh <- fmt.Errorf("kv grpc serve: %w", err)
-		}
-	}()
-	go func() {
-		if err := raftServer.Serve(raftLis); err != nil {
-			errCh <- fmt.Errorf("consensus grpc serve: %w", err)
+		if err := server.Serve(lis); err != nil {
+			errCh <- fmt.Errorf("grpc serve: %w", err)
 		}
 	}()
 
 	select {
 	case <-ctx.Done():
-		raftServer.GracefulStop()
-		kvServer.GracefulStop()
+		server.GracefulStop()
 		return nil
 	case err := <-errCh:
-		raftServer.Stop()
-		kvServer.Stop()
+		server.Stop()
 		return err
 	}
 }

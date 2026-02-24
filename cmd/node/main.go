@@ -17,6 +17,7 @@ import (
 	raftconsensus "github.com/i-melnichenko/consensus-lab/internal/consensus/raft"
 	"github.com/i-melnichenko/consensus-lab/internal/kv"
 	"github.com/i-melnichenko/consensus-lab/internal/service"
+	admingrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/admin"
 	raftgrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/raft"
 )
 
@@ -65,8 +66,9 @@ func run() error {
 	kvSvc := service.NewKV(node, store, logger)
 	kvSvc.SnapshotEvery = cfg.SnapshotEvery
 	raftSrv := raftgrpc.NewServer(node)
+	adminSrv := admingrpc.NewServer(cfg.NodeID, string(cfg.ConsensusType), peerAddrs, node)
 
-	app, err := apppkg.New(cfg, logger, node, kvSvc, raftSrv)
+	app, err := apppkg.New(cfg, logger, node, kvSvc, raftSrv, adminSrv)
 	if err != nil {
 		node.Stop()
 		return err

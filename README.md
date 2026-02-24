@@ -1,8 +1,9 @@
 # consensus-lab
 
-Raft-backed distributed KV store in Go. A `cmd/node` process exposes two gRPC APIs:
+Raft-backed distributed KV store in Go. A `cmd/node` process exposes three gRPC APIs on a single gRPC port:
 
 - KV API (`kv.v1.KVService`) — client reads/writes
+- Admin API (`admin.v1.AdminService`) — node/cluster diagnostics (`GetNodeInfo`)
 - Raft API (`raft.v1.RaftService`) — consensus peer traffic
 
 ## Implementation Status
@@ -28,19 +29,21 @@ Raft-backed distributed KV store in Go. A `cmd/node` process exposes two gRPC AP
 
 ## Quick Start (Docker)
 
-Run a 3-node Raft cluster with a single command:
+Run a local Raft cluster with a single command:
 
 ```bash
-docker compose up --build
+make docker-up
 ```
 
-Nodes expose their KV API on the host:
+Docker Compose starts 5 nodes. Each node exposes a single host gRPC port (shared by KV/Admin/Raft):
 
-| Node   | KV gRPC |
-|--------|---------|
+| Node   | Shared gRPC |
+|--------|-------------|
 | node-1 | `:8081` |
 | node-2 | `:8082` |
 | node-3 | `:8083` |
+| node-4 | `:8084` |
+| node-5 | `:8085` |
 
 ## CLI Client
 
@@ -48,23 +51,40 @@ Nodes expose their KV API on the host:
 
 - **get** — picks a random node (distributes reads across replicas)
 - **put / delete** — tries all nodes until the leader accepts the write
+- **admin** — polls each admin endpoint and renders a live table (refresh every 500ms)
+
+Write semantics:
+
+- `put` / `delete` are acknowledged only after the command is **committed and applied**
+- if the cluster cannot reach quorum (or does not commit in time), the request fails by timeout
 
 ```bash
 # point at the whole cluster — leader discovery is automatic
-go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083 put foo bar
-go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083 get foo
-go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083 delete foo
+go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 put foo bar
+go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 get foo
+go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 delete foo
 
 # single node still works
 go run ./cmd/client --addr localhost:8081 get foo
+
+# live admin dashboard (same shared gRPC ports)
+go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 admin
+
+# same via Makefile
+make admin
+NODES=localhost:8081,localhost:8082,localhost:8083 make admin
+
+# inspect services with grpcurl (reflection enabled)
+grpcurl -plaintext localhost:8081 list
+grpcurl -plaintext -d '{}' localhost:8081 admin.v1.AdminService/GetNodeInfo
 ```
 
 Flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--addr` | `localhost:8080` | Comma-separated KV gRPC addresses |
-| `--timeout` | `5s` | Request timeout |
+| `--addr` | `localhost:8080` | Comma-separated gRPC addresses for the selected mode (KV or Admin) |
+| `--timeout` | `5s` | Request timeout (for writes, includes waiting for commit/apply) |
 
 ## Run Node Manually
 
@@ -75,8 +95,7 @@ Environment variables:
 | `APP_NODE_ID` | Local node ID |
 | `APP_CONSENSUS_TYPE` | must be `raft` |
 | `APP_LOG_LEVEL` | `debug\|info\|warn\|error` |
-| `APP_KV_GRPC_ADDR` | KV gRPC listen address |
-| `APP_CONSENSUS_GRPC_ADDR` | Raft gRPC listen address |
+| `APP_GRPC_ADDR` | Shared gRPC listen address for KV/Admin/Raft |
 | `APP_DATA_DIR` | Local Raft storage directory |
 | `APP_PEERS` | Comma-separated peers (`id=host:port` or `host:port`). The node's own ID is ignored, so the full cluster list can be used on every node. |
 | `APP_SNAPSHOT_EVERY` | Trigger a snapshot after this many applied commands. `0` disables (default). |
@@ -87,36 +106,25 @@ Environment variables:
 # All three nodes share the same APP_PEERS list — the node removes itself automatically.
 
 # terminal 1
-APP_NODE_ID=node-1 APP_KV_GRPC_ADDR=:8081 APP_CONSENSUS_GRPC_ADDR=:9091 \
+APP_NODE_ID=node-1 APP_GRPC_ADDR=:8081 \
 APP_DATA_DIR=./var/node-1 \
-APP_PEERS=node-1=:9091,node-2=:9092,node-3=:9093 \
+APP_PEERS=node-1=:8081,node-2=:8082,node-3=:8083 \
 go run ./cmd/node
 
 # terminal 2
-APP_NODE_ID=node-2 APP_KV_GRPC_ADDR=:8082 APP_CONSENSUS_GRPC_ADDR=:9092 \
+APP_NODE_ID=node-2 APP_GRPC_ADDR=:8082 \
 APP_DATA_DIR=./var/node-2 \
-APP_PEERS=node-1=:9091,node-2=:9092,node-3=:9093 \
+APP_PEERS=node-1=:8081,node-2=:8082,node-3=:8083 \
 go run ./cmd/node
 
 # terminal 3
-APP_NODE_ID=node-3 APP_KV_GRPC_ADDR=:8083 APP_CONSENSUS_GRPC_ADDR=:9093 \
+APP_NODE_ID=node-3 APP_GRPC_ADDR=:8083 \
 APP_DATA_DIR=./var/node-3 \
-APP_PEERS=node-1=:9091,node-2=:9092,node-3=:9093 \
+APP_PEERS=node-1=:8081,node-2=:8082,node-3=:8083 \
 go run ./cmd/node
 ```
 
 Note: cluster membership is static. Runtime add/remove peers is not implemented.
-
-### Fault tolerance
-
-A 3-node cluster tolerates **1 node failure**. With only 1 node remaining the
-cluster stops accepting writes (Raft requires a majority quorum of 2).
-
-| Nodes | Quorum | Failures tolerated |
-|-------|--------|--------------------|
-| 1     | 1      | 0                  |
-| 3     | 2      | **1**              |
-| 5     | 3      | 2                  |
 
 ## Build & Test
 
@@ -127,21 +135,21 @@ go test ./...
 
 ## Benchmarking
 
-Run the local benchmark suite against a 3-node Docker cluster:
+Run the local benchmark suite against the local Docker cluster:
 
 ```bash
-docker compose up --build
-./benchmark.sh
+make docker-up
+make bench
 ```
 
 Run a single benchmark:
 
 ```bash
-./benchmark.sh write_latency
-./benchmark.sh read_latency
-./benchmark.sh failover_time
-./benchmark.sh stale_reads
-./benchmark.sh slow_follower_recovery
+make bench-write_latency
+make bench-read_latency
+make bench-failover_time
+make bench-stale_reads
+make bench-slow_follower_recovery
 ```
 
 The script measures:
@@ -153,7 +161,46 @@ The script measures:
 - stale follower reads (demonstrates non-linearizable follower reads without ReadIndex)
 - slow follower pause/resume recovery time (log backfill)
 
-Results are written to `.bench-results/*.txt`.
+Results are written to `.results/benchmark/*.txt`.
+
+## Fault Tolerance Scenarios
+
+Run scripted failure/recovery scenarios against the local Docker cluster:
+
+```bash
+make fault-test
+```
+
+Open the live admin dashboard in another terminal while running scenarios/benchmarks:
+
+```bash
+make admin
+```
+
+The script exercises:
+
+- baseline read/write
+- write availability with one follower down
+- leader failover and write recovery
+- quorum loss (writes must fail)
+- quorum restoration (writes resume)
+
+It also adds short pauses around stop/start transitions so changes are easier to observe in the admin dashboard.
+
+Useful env vars:
+
+- `OBSERVE_SLEEP` — pause duration in seconds between state transitions (default `2`)
+- `FT_BULK_WRITES` — number of writes used in bulk checks (default `25`)
+
+Implementation scripts are located in `scripts/`:
+
+- `scripts/benchmark.sh`
+- `scripts/fault_tolerance.sh`
+
+Result directories:
+
+- benchmarks: `.results/benchmark/`
+- fault tolerance scenarios: `.results/fault/`
 
 Notes:
 

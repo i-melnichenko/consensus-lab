@@ -20,14 +20,16 @@ const usage = `Usage:
   client [--addr host:port[,host:port,...]] get <key>
   client [--addr host:port[,host:port,...]] put <key> <value>
   client [--addr host:port[,host:port,...]] delete <key>
+  client [--addr host:port[,host:port,...]] admin
 
 When multiple addresses are provided:
   - get    uses a random node (read from any replica)
   - put    finds the leader automatically
   - delete finds the leader automatically
+  - admin  polls each admin gRPC endpoint and renders a live table
 
 Flags:
-  --addr     Comma-separated list of KV gRPC addresses (default "localhost:8080")
+  --addr     Comma-separated gRPC addresses for the selected mode (KV or Admin)
   --timeout  Request timeout (default 5s)
 `
 
@@ -47,38 +49,59 @@ func run() error {
 	args := flag.Args()
 	if len(args) == 0 {
 		flag.Usage()
-		return fmt.Errorf("subcommand required: get | put | delete")
+		return fmt.Errorf("subcommand required: get | put | delete | admin")
 	}
 
 	addrs := splitAddrs(*addr)
 
-	client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = client.Close() }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-
 	switch args[0] {
 	case "get":
+		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
 		if len(args) != 2 {
 			return fmt.Errorf("usage: get <key>")
 		}
 		return cmdGet(ctx, client, args[1])
 
 	case "put":
+		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
 		if len(args) != 3 {
 			return fmt.Errorf("usage: put <key> <value>")
 		}
 		return cmdPut(ctx, client, args[1], args[2])
 
 	case "delete":
+		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
 		if len(args) != 2 {
 			return fmt.Errorf("usage: delete <key>")
 		}
 		return cmdDelete(ctx, client, args[1])
+
+	case "admin":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: admin")
+		}
+		return cmdAdmin(addrs, *timeout)
 
 	default:
 		flag.Usage()
@@ -132,4 +155,28 @@ func splitAddrs(raw string) []string {
 		}
 	}
 	return out
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }

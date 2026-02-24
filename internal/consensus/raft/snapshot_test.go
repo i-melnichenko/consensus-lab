@@ -168,6 +168,46 @@ func TestHandleInstallSnapshot_IgnoresOlderSnapshot(t *testing.T) {
 	}
 }
 
+func TestHandleInstallSnapshot_ReplacesSameIndexWhenTermDiffers(t *testing.T) {
+	applyCh := make(chan consensus.ApplyMsg, 1)
+	n := newTestNode("n1", map[string]PeerClient{}, applyCh)
+	n.currentTerm = 3
+	n.snapshotIndex = 10
+	n.snapshotTerm = 2
+	n.snapshot = &Snapshot{
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  2,
+		Data:              []byte("old"),
+	}
+	n.commitIndex = 10
+
+	resp, err := n.HandleInstallSnapshot(context.Background(), &InstallSnapshotRequest{
+		Term:              3,
+		LeaderID:          "n0",
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  4,
+		Data:              []byte("new"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Term != 3 {
+		t.Errorf("resp.Term: want 3, got %d", resp.Term)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.snapshotIndex != 10 {
+		t.Fatalf("snapshotIndex: want 10, got %d", n.snapshotIndex)
+	}
+	if n.snapshotTerm != 4 {
+		t.Fatalf("snapshotTerm: want 4, got %d", n.snapshotTerm)
+	}
+	if n.snapshot == nil || string(n.snapshot.Data) != "new" {
+		t.Fatalf("snapshot data not replaced")
+	}
+}
+
 // --- Apply loop: snapshot message delivery ---
 
 func TestApplyLoop_DeliversSnapshotBeforeLogEntries(t *testing.T) {
