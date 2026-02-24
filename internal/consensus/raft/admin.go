@@ -1,7 +1,9 @@
 package raft
 
-import "sort"
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // AdminPeerState is a point-in-time snapshot of leader-side replication progress for a peer.
 type AdminPeerState struct {
