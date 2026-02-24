@@ -343,20 +343,20 @@ func makeTableRow(r adminRow, cols adminColWidths, showAat, selected bool) strin
 // renderHeader returns the styled table header line padded to contentWidth.
 func renderHeader(cols adminColWidths, showAat bool, contentWidth int) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%-2s", "ST"))
-	b.WriteString(fmt.Sprintf(" %-*s", cols.addr, headerLabel("ADDR", cols.addr)))
-	b.WriteString(fmt.Sprintf(" %-*s", cols.node, headerLabel("NODE", cols.node)))
-	b.WriteString(fmt.Sprintf(" %-*s", cols.role, headerLabel("ROLE", cols.role)))
-	b.WriteString(fmt.Sprintf(" %-*s", cols.leader, headerLabel("LEADER", cols.leader)))
-	b.WriteString(fmt.Sprintf(" %4s", "TERM"))
-	b.WriteString(fmt.Sprintf(" %5s", "CMT"))
-	b.WriteString(fmt.Sprintf(" %5s", "APL"))
-	b.WriteString(fmt.Sprintf(" %5s", "LOG"))
-	b.WriteString(fmt.Sprintf(" %5s", "SNAP"))
+	fmt.Fprintf(&b, "%-2s", "ST")
+	fmt.Fprintf(&b, " %-*s", cols.addr, headerLabel("ADDR", cols.addr))
+	fmt.Fprintf(&b, " %-*s", cols.node, headerLabel("NODE", cols.node))
+	fmt.Fprintf(&b, " %-*s", cols.role, headerLabel("ROLE", cols.role))
+	fmt.Fprintf(&b, " %-*s", cols.leader, headerLabel("LEADER", cols.leader))
+	fmt.Fprintf(&b, " %4s", "TERM")
+	fmt.Fprintf(&b, " %5s", "CMT")
+	fmt.Fprintf(&b, " %5s", "APL")
+	fmt.Fprintf(&b, " %5s", "LOG")
+	fmt.Fprintf(&b, " %5s", "SNAP")
 	if showAat {
-		b.WriteString(fmt.Sprintf(" %-8s", "A_AT"))
+		fmt.Fprintf(&b, " %-8s", "A_AT")
 	}
-	b.WriteString(fmt.Sprintf(" %-3s", "CFG"))
+	fmt.Fprintf(&b, " %-3s", "CFG")
 	return styles.tableHeader.Width(contentWidth).MaxWidth(contentWidth).Render(b.String())
 }
 

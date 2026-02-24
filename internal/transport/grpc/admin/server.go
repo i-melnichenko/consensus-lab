@@ -2,11 +2,13 @@ package admingrpc
 
 import (
 	"context"
+	"math"
 	"sort"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	raftconsensus "github.com/i-melnichenko/consensus-lab/internal/consensus/raft"
 	adminpb "github.com/i-melnichenko/consensus-lab/pkg/proto/adminv1"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // RaftInspector is the subset of *raft.Node required by the admin gRPC server.
@@ -63,7 +65,7 @@ func (s *Server) GetNodeInfo(_ context.Context, _ *adminpb.GetNodeInfoRequest) (
 			SnapshotLastTerm:  rs.SnapshotLastTerm,
 			SnapshotSizeBytes: rs.SnapshotSizeBytes,
 			ClusterMembers:    append([]string(nil), rs.ClusterMembers...),
-			QuorumSize:        int32(rs.QuorumSize),
+			QuorumSize:        safeInt32(rs.QuorumSize),
 			Peers:             make([]*adminpb.RaftPeerInfo, 0, len(rs.Peers)),
 		}
 		if !rs.LastAppliedAt.IsZero() {
@@ -142,4 +144,14 @@ func mapRaftStatus(v raftconsensus.NodeStatus) adminpb.NodeStatus {
 	default:
 		return adminpb.NodeStatus_NODE_STATUS_UNSPECIFIED
 	}
+}
+
+func safeInt32(v int) int32 {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if v < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(v)
 }
