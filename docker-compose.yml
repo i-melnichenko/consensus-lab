@@ -2,12 +2,11 @@ x-node: &node-defaults
   build: .
   environment: &node-env
     APP_CONSENSUS_TYPE: raft
-    APP_LOG_LEVEL: debug
-    APP_KV_GRPC_ADDR: :8080
-    APP_CONSENSUS_GRPC_ADDR: :9090
+    APP_LOG_LEVEL: info
+    APP_GRPC_ADDR: :8080
     APP_DATA_DIR: /var/node
-    APP_PEERS: node-1=node-1:9090,node-2=node-2:9090,node-3=node-3:9090,node-4=node-4:9090,node-5=node-5:9090
-    APP_SNAPSHOT_EVERY: 10
+    APP_PEERS: node-1=node-1:8080,node-2=node-2:8080,node-3=node-3:8080,node-4=node-4:8080,node-5=node-5:8080
+    APP_SNAPSHOT_EVERY: 100
 
 services:
   node-1:
@@ -17,7 +16,6 @@ services:
       APP_NODE_ID: node-1
     ports:
       - "8081:8080"
-      - "8091:8090"
     volumes:
       - node-1-data:/var/node
 
@@ -28,7 +26,6 @@ services:
       APP_NODE_ID: node-2
     ports:
       - "8082:8080"
-      - "8092:8090"
     volumes:
       - node-2-data:/var/node
 
@@ -39,7 +36,6 @@ services:
       APP_NODE_ID: node-3
     ports:
       - "8083:8080"
-      - "8093:8090"
     volumes:
       - node-3-data:/var/node
 
@@ -50,7 +46,6 @@ services:
       APP_NODE_ID: node-4
     ports:
       - "8084:8080"
-      - "8094:8090"
     volumes:
       - node-4-data:/var/node
 
@@ -61,7 +56,6 @@ services:
       APP_NODE_ID: node-5
     ports:
       - "8085:8080"
-      - "8095:8090"
     volumes:
       - node-5-data:/var/node
 

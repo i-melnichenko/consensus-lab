@@ -9,9 +9,12 @@
 
 set -euo pipefail
 
-NODES="localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085"
-ALL_KV_PORTS=(8081 8082 8083 8084 8085)
-RESULTS_DIR="./.bench-results"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+cd "$REPO_ROOT"
+
+NODES="${NODES:-}"
+RESULTS_DIR="./.results/fault"
 mkdir -p "$RESULTS_DIR"
 
 TIMEOUT="${TIMEOUT:-5s}"
@@ -19,6 +22,8 @@ OBSERVE_SLEEP="${OBSERVE_SLEEP:-2}"
 RUN_ID="${RUN_ID:-$(date +%s)}"
 FT_BULK_WRITES="${FT_BULK_WRITES:-25}"
 RESULT_FILE="$RESULTS_DIR/fault_tolerance.txt"
+NODE_ADDRS=()
+LEADER_HINT_ADDR=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
@@ -36,6 +41,15 @@ observe_sleep() {
     fi
     log "  pause ${seconds}s (${reason})"
     sleep "$seconds"
+}
+
+init_node_addrs() {
+    IFS=',' read -r -a NODE_ADDRS <<<"$NODES"
+}
+
+port_from_addr() {
+    local addr="$1"
+    echo "${addr##*:}"
 }
 
 CLIENT_BIN="$RESULTS_DIR/client"
@@ -60,6 +74,57 @@ run_client_node() {
     "$CLIENT_BIN" --addr "$addr" --timeout 2s "$@" 2>/dev/null
 }
 
+detect_leader_addr() {
+    local addrs_csv="${1:-$NODES}"
+    local addrs=()
+    IFS=',' read -r -a addrs <<<"$addrs_csv"
+    local addr
+    for addr in "${addrs[@]}"; do
+        if run_client_node "$addr" put "ft:probe:${RUN_ID}" "x" > /dev/null 2>&1; then
+            echo "$addr"
+            return 0
+        fi
+    done
+    return 1
+}
+
+refresh_leader_hint() {
+    local addrs_csv="${1:-$NODES}"
+    LEADER_HINT_ADDR="$(detect_leader_addr "$addrs_csv" || true)"
+    [[ -n "$LEADER_HINT_ADDR" ]]
+}
+
+addr_in_csv() {
+    local needle="$1"
+    local addrs_csv="$2"
+    local addrs=()
+    IFS=',' read -r -a addrs <<<"$addrs_csv"
+    local addr
+    for addr in "${addrs[@]}"; do
+        [[ "$addr" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+put_preferring_leader() {
+    local addrs_csv="$1"; shift
+    local key="$1"; shift
+    local value="$1"; shift
+
+    if [[ -n "$LEADER_HINT_ADDR" ]] && addr_in_csv "$LEADER_HINT_ADDR" "$addrs_csv"; then
+        if run_client_node "$LEADER_HINT_ADDR" put "$key" "$value" > /dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    refresh_leader_hint "$addrs_csv" || true
+    if [[ -n "$LEADER_HINT_ADDR" ]]; then
+        if run_client_node "$LEADER_HINT_ADDR" put "$key" "$value" > /dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    run_client_addrs "$addrs_csv" put "$key" "$value" > /dev/null 2>&1
+}
+
 retry_put() {
     local addrs="$1"; shift
     local key="$1"; shift
@@ -69,7 +134,7 @@ retry_put() {
 
     local i
     for i in $(seq 1 "$attempts"); do
-        if run_client_addrs "$addrs" put "$key" "$value" > /dev/null 2>&1; then
+        if put_preferring_leader "$addrs" "$key" "$value"; then
             return 0
         fi
         sleep "$sleep_s"
@@ -78,10 +143,11 @@ retry_put() {
 }
 
 leader_port() {
-    local port
-    for port in "${ALL_KV_PORTS[@]}"; do
+    local addr port
+    for addr in "${NODE_ADDRS[@]}"; do
+        port="$(port_from_addr "$addr")"
         printf "\r  probing leader :%s" "$port" >&2
-        if run_client_node "localhost:$port" put "ft:probe:${RUN_ID}" "x" > /dev/null 2>&1; then
+        if run_client_node "$addr" put "ft:probe:${RUN_ID}" "x" > /dev/null 2>&1; then
             echo >&2
             echo "$port"
             return 0
@@ -132,16 +198,18 @@ bulk_write_check() {
     local prefix="$1"
     local count="$2"
     local addrs="${3:-$NODES}"
+    local attempts_per_key="${4:-5}"
 
     local ok_count=0
     local i
     for i in $(seq 1 "$count"); do
-        printf "\r  bulk writes: %d/%d (%s:%d)" "$i" "$count" "$prefix" "$i"
-        if run_client_addrs "$addrs" put "${prefix}:$i" "v-$i" > /dev/null 2>&1; then
+        printf "\r\033[2K  bulk writes: %d/%d (ok=%d)" "$i" "$count" "$ok_count"
+        if retry_put "$addrs" "${prefix}:$i" "v-$i" "$attempts_per_key" 0.2; then
             (( ok_count++ )) || true
         fi
     done
-    echo
+    printf "\r\033[2K"
+    echo "  bulk writes complete: ${ok_count}/${count}"
 
     [[ "$ok_count" -eq "$count" ]]
 }
@@ -306,7 +374,7 @@ scenario_leader_failover() {
         record_result "leader_failover" "FAIL" "leader=$container wait_down_timeout=1"
         return 1
     fi
-    observe_sleep "leader stopped (watch role changes)"
+    observe_sleep "leader stopped (watch role changes / election)" 3
 
     local start end elapsed recovered=false
     start=$(date +%s%N)
@@ -426,6 +494,24 @@ print_summary() {
 }
 
 main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --nodes)
+                NODES="${2:?--nodes requires value}"
+                shift 2
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    init_node_addrs
+    if [[ ${#NODE_ADDRS[@]} -eq 0 ]]; then
+        fail "no nodes provided (use --nodes or NODES=...)"
+        exit 1
+    fi
+
     : > "$RESULT_FILE"
     trap cleanup_resume_all EXIT
 

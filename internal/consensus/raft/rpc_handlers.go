@@ -282,13 +282,30 @@ func (n *Node) HandleInstallSnapshot(
 	n.resetElectionTimeout()
 	resp.Term = n.currentTerm
 
-	if req.LastIncludedIndex <= n.snapshotIndex {
+	switch {
+	case req.LastIncludedIndex < n.snapshotIndex:
 		n.logger.Debug("InstallSnapshot ignored: already have newer snapshot",
 			"node_id", n.id,
 			"our_snapshot_index", n.snapshotIndex,
+			"our_snapshot_term", n.snapshotTerm,
 			"req_snapshot_index", req.LastIncludedIndex,
+			"req_snapshot_term", req.LastIncludedTerm,
 		)
 		return resp, nil
+	case req.LastIncludedIndex == n.snapshotIndex && req.LastIncludedTerm == n.snapshotTerm:
+		n.logger.Debug("InstallSnapshot ignored: already have same snapshot",
+			"node_id", n.id,
+			"snapshot_index", n.snapshotIndex,
+			"snapshot_term", n.snapshotTerm,
+		)
+		return resp, nil
+	case req.LastIncludedIndex == n.snapshotIndex && req.LastIncludedTerm != n.snapshotTerm:
+		n.logger.Debug("InstallSnapshot replacing snapshot at same index due to term mismatch",
+			"node_id", n.id,
+			"snapshot_index", n.snapshotIndex,
+			"our_snapshot_term", n.snapshotTerm,
+			"req_snapshot_term", req.LastIncludedTerm,
+		)
 	}
 
 	snap := Snapshot{

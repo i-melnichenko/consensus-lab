@@ -21,10 +21,8 @@ type Config struct {
 	ConsensusType ConsensusType
 	LogLevel      string
 
-	KVGRPCAddr        string
-	AdminGRPCAddr     string
-	ConsensusGRPCAddr string
-	DataDir           string
+	GRPCAddr string
+	DataDir  string
 
 	PeerAddrs []string
 
@@ -36,13 +34,11 @@ type Config struct {
 // DefaultConfig returns a local-development configuration.
 func DefaultConfig() Config {
 	return Config{
-		NodeID:            "node-1",
-		ConsensusType:     ConsensusTypeRaft,
-		LogLevel:          "info",
-		KVGRPCAddr:        ":8080",
-		AdminGRPCAddr:     ":8090",
-		ConsensusGRPCAddr: ":9090",
-		DataDir:           "./var/node-1",
+		NodeID:        "node-1",
+		ConsensusType: ConsensusTypeRaft,
+		LogLevel:      "info",
+		GRPCAddr:      ":8080",
+		DataDir:       "./var/node-1",
 	}
 }
 
@@ -52,9 +48,7 @@ func DefaultConfig() Config {
 // - APP_NODE_ID
 // - APP_CONSENSUS_TYPE (must be "raft")
 // - APP_LOG_LEVEL (debug|info|warn|error)
-// - APP_KV_GRPC_ADDR
-// - APP_ADMIN_GRPC_ADDR
-// - APP_CONSENSUS_GRPC_ADDR
+// - APP_GRPC_ADDR
 // - APP_DATA_DIR
 // - APP_PEERS (comma-separated addresses)
 // - APP_SNAPSHOT_EVERY (uint, 0 = disabled)
@@ -70,14 +64,8 @@ func LoadConfigFromEnv() (Config, error) {
 	if v := strings.TrimSpace(os.Getenv("APP_LOG_LEVEL")); v != "" {
 		cfg.LogLevel = strings.ToLower(v)
 	}
-	if v := strings.TrimSpace(os.Getenv("APP_KV_GRPC_ADDR")); v != "" {
-		cfg.KVGRPCAddr = v
-	}
-	if v := strings.TrimSpace(os.Getenv("APP_ADMIN_GRPC_ADDR")); v != "" {
-		cfg.AdminGRPCAddr = v
-	}
-	if v := strings.TrimSpace(os.Getenv("APP_CONSENSUS_GRPC_ADDR")); v != "" {
-		cfg.ConsensusGRPCAddr = v
+	if v := strings.TrimSpace(os.Getenv("APP_GRPC_ADDR")); v != "" {
+		cfg.GRPCAddr = v
 	}
 	if v := strings.TrimSpace(os.Getenv("APP_DATA_DIR")); v != "" {
 		cfg.DataDir = v
@@ -114,14 +102,8 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("app: unsupported log level %q", c.LogLevel)
 	}
-	if strings.TrimSpace(c.KVGRPCAddr) == "" {
-		return fmt.Errorf("app: kv grpc addr is required")
-	}
-	if strings.TrimSpace(c.AdminGRPCAddr) == "" {
-		return fmt.Errorf("app: admin grpc addr is required")
-	}
-	if strings.TrimSpace(c.ConsensusGRPCAddr) == "" {
-		return fmt.Errorf("app: consensus grpc addr is required")
+	if strings.TrimSpace(c.GRPCAddr) == "" {
+		return fmt.Errorf("app: grpc addr is required")
 	}
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("app: data dir is required")

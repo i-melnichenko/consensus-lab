@@ -10,8 +10,11 @@ GOLANGCI_LINT_IMAGE ?= golangci/golangci-lint:$(GOLANGCI_LINT_VERSION)
 
 .PHONY: help build test test-race fmt proto proto-check \
 	lint lint-install lint-docker \
-	docker-up docker-down \
-	run-node run-client
+	docker-up docker-down docker-reset \
+	bench bench-% fault-test \
+	run-node run-client admin
+
+NODES ?= localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085
 
 help:
 	@echo "Targets:"
@@ -22,8 +25,13 @@ help:
 	@echo "  proto        Regenerate protobuf code via buf"
 	@echo "  proto-check  Check protobuf generation is up to date"
 	@echo "  lint-docker  Run golangci-lint in Docker"
-	@echo "  docker-up    Start local 3-node cluster via docker compose"
+	@echo "  docker-up    Start local cluster via docker compose"
 	@echo "  docker-down  Stop local cluster"
+	@echo "  docker-reset Stop local cluster and remove volumes"
+	@echo "  bench        Run benchmark suite (scripts/benchmark.sh)"
+	@echo "  bench-<name> Run one benchmark (e.g. bench-write_latency)"
+	@echo "  fault-test   Run fault tolerance scenarios (scripts/fault_tolerance.sh)"
+	@echo "  admin        Run live admin dashboard (go run ./cmd/client ... admin)"
 	@echo "  run-node     Run node binary (go run ./cmd/node)"
 	@echo "  run-client   Run client binary (go run ./cmd/client --help)"
 
@@ -60,6 +68,21 @@ docker-up:
 
 docker-down:
 	$(DOCKER) compose down
+
+docker-reset:
+	$(DOCKER) compose down -v
+
+bench:
+	./scripts/benchmark.sh --nodes "$(NODES)"
+
+bench-%:
+	./scripts/benchmark.sh --nodes "$(NODES)" $*
+
+fault-test:
+	./scripts/fault_tolerance.sh --nodes "$(NODES)"
+
+admin:
+	$(GO) run ./cmd/client --addr "$(NODES)" admin
 
 run-node:
 	$(GO) run ./cmd/node
