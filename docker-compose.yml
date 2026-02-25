@@ -3,12 +3,47 @@ x-node: &node-defaults
   environment: &node-env
     APP_CONSENSUS_TYPE: raft
     APP_LOG_LEVEL: info
+    APP_TRACING_ENABLED: "true"
+    APP_TRACING_ENDPOINT: jaeger:4317
+    APP_TRACING_SERVICE_NAME: consensus-node
     APP_GRPC_ADDR: :8080
+    APP_METRICS_ADDR: :9090
     APP_DATA_DIR: /var/node
     APP_PEERS: node-1=node-1:8080,node-2=node-2:8080,node-3=node-3:8080,node-4=node-4:8080,node-5=node-5:8080
     APP_SNAPSHOT_EVERY: 100
+    APP_PPROF_ADDR: :6060
 
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.75.0
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v3.9.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:12.3
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+
   node-1:
     <<: *node-defaults
     environment:
@@ -16,6 +51,7 @@ services:
       APP_NODE_ID: node-1
     ports:
       - "8081:8080"
+      - "6060:6060"
     volumes:
       - node-1-data:/var/node
 
@@ -60,6 +96,8 @@ services:
       - node-5-data:/var/node
 
 volumes:
+  prometheus-data:
+  grafana-data:
   node-1-data:
   node-2-data:
   node-3-data:

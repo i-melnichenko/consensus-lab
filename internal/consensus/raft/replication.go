@@ -2,6 +2,11 @@ package raft
 
 import (
 	"context"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func (n *Node) runLeader(ctx context.Context) {
@@ -102,6 +107,19 @@ func (n *Node) sendAppendEntries(
 	peerClient PeerClient,
 	req *AppendEntriesRequest,
 ) {
+	ctx, span := n.startSpan(
+		ctx,
+		"raft.node.sendAppendEntries",
+		attribute.String("raft.peer_id", peerID),
+		attribute.Int64("raft.term", req.Term),
+		attribute.Int64("raft.prev_log_index", req.PrevLogIndex),
+		attribute.Int64("raft.prev_log_term", req.PrevLogTerm),
+		attribute.Int("raft.entries_count", len(req.Entries)),
+		attribute.Bool("raft.is_heartbeat", len(req.Entries) == 0),
+		attribute.Int64("raft.leader_commit", req.LeaderCommit),
+	)
+	defer span.End()
+
 	if len(req.Entries) > 0 {
 		n.logger.Debug("sending AppendEntries",
 			"node_id", n.id,
@@ -128,8 +146,17 @@ func (n *Node) sendAppendEntries(
 		}
 	}()
 
+	heartbeat := len(req.Entries) == 0
+	rpcStart := time.Now()
 	resp, err := peerClient.AppendEntries(ctx, req)
+	n.metrics.ObserveRaftAppendEntriesRPCDuration(n.id, peerID, heartbeat, time.Since(rpcStart))
 	if err != nil || resp == nil {
+		if err != nil {
+			n.metrics.IncRaftAppendEntriesRPCError(n.id, peerID, heartbeat, appendEntriesRPCErrorKind(err))
+		}
+		if resp == nil {
+			n.metrics.IncRaftAppendEntriesRPCError(n.id, peerID, heartbeat, "nil_response")
+		}
 		if err != nil && len(req.Entries) > 0 {
 			n.logger.Debug("AppendEntries RPC failed",
 				"node_id", n.id,
@@ -137,11 +164,22 @@ func (n *Node) sendAppendEntries(
 				"error", err,
 			)
 		}
+		if err != nil {
+			spanRecordError(span, err)
+		}
 		return
 	}
+	span.SetAttributes(
+		attribute.Int64("raft.response_term", resp.Term),
+		attribute.Bool("raft.append.success", resp.Success),
+		attribute.Int64("raft.conflict_term", resp.ConflictTerm),
+		attribute.Int64("raft.conflict_index", resp.ConflictIndex),
+	)
 
 	var notifyApply bool
 	var notifyReplicate bool
+	handleRespCtx, handleRespSpan := n.startSpan(ctx, "raft.node.handleAppendEntriesResponse")
+	defer handleRespSpan.End()
 
 	n.mu.Lock()
 
@@ -155,7 +193,7 @@ func (n *Node) sendAppendEntries(
 		n.currentTerm = resp.Term
 		n.votedFor = ""
 		n.role = Follower
-		if err := n.persistHardStateLocked(); err != nil {
+		if err := n.tracePersistHardStateLocked(handleRespCtx, "leader_step_down_higher_term_append_entries_response"); err != nil {
 			n.markDegradedLocked(err)
 		}
 		n.mu.Unlock()
@@ -174,6 +212,7 @@ func (n *Node) sendAppendEntries(
 	}
 
 	if !resp.Success {
+		n.metrics.IncRaftAppendEntriesReject(n.id, peerID, heartbeat)
 		prevNext := n.nextIndex[peerID]
 		switch {
 		case resp.ConflictTerm > 0:
@@ -208,6 +247,10 @@ func (n *Node) sendAppendEntries(
 			"conflict_term", resp.ConflictTerm,
 			"conflict_index", resp.ConflictIndex,
 		)
+		handleRespSpan.SetAttributes(
+			attribute.Bool("raft.append.rejected", true),
+			attribute.Int64("raft.next_index", n.nextIndex[peerID]),
+		)
 		n.mu.Unlock()
 		n.notifyReplicate()
 		return
@@ -220,6 +263,11 @@ func (n *Node) sendAppendEntries(
 	if next := matchIndex + 1; next > n.nextIndex[peerID] {
 		n.nextIndex[peerID] = next
 	}
+	handleRespSpan.SetAttributes(
+		attribute.Bool("raft.append.rejected", false),
+		attribute.Int64("raft.match_index", n.matchIndex[peerID]),
+		attribute.Int64("raft.next_index", n.nextIndex[peerID]),
+	)
 
 	if len(req.Entries) > 0 {
 		n.logger.Debug("AppendEntries succeeded",
@@ -246,6 +294,23 @@ func (n *Node) sendAppendEntries(
 	}
 }
 
+func appendEntriesRPCErrorKind(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if s, ok := status.FromError(err); ok {
+		switch s.Code() {
+		case codes.DeadlineExceeded:
+			return "deadline_exceeded"
+		case codes.Unavailable:
+			return "unavailable"
+		default:
+			return s.Code().String()
+		}
+	}
+	return "transport"
+}
+
 func (n *Node) advanceCommitIndexLocked() bool {
 	majority := n.quorumSize()
 	lastIndex := n.lastLogIndexLocked()
@@ -270,7 +335,12 @@ func (n *Node) advanceCommitIndexLocked() bool {
 				"new_commit_index", candidate,
 				"term", n.currentTerm,
 			)
+			prevCommit := n.commitIndex
 			n.commitIndex = candidate
+			now := time.Now()
+			n.observeStartToCommitRangeLocked(prevCommit, n.commitIndex, now)
+			n.recordCommitSeenRangeLocked(prevCommit, n.commitIndex, now)
+			n.metrics.SetRaftApplyLag(n.id, n.commitIndex-n.lastApplied)
 			if err := n.persistHardStateLocked(); err != nil {
 				n.markDegradedLocked(err)
 				return false

@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -23,7 +24,7 @@ func startServer(t *testing.T, handler raftgrpc.Handler) (*raftgrpc.PeerClient, 
 
 	lis := bufconn.Listen(bufSize)
 	srv := grpc.NewServer()
-	raftpb.RegisterRaftServiceServer(srv, raftgrpc.NewServer(handler))
+	raftpb.RegisterRaftServiceServer(srv, raftgrpc.NewServer(handler, otel.Tracer("test/internal/transport/grpc/raft")))
 	go func() { _ = srv.Serve(lis) }()
 
 	dialOpts := []grpc.DialOption{
@@ -32,7 +33,7 @@ func startServer(t *testing.T, handler raftgrpc.Handler) (*raftgrpc.PeerClient, 
 		}),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
-	pc, err := raftgrpc.Dial("passthrough:///bufconn", dialOpts...)
+	pc, err := raftgrpc.Dial("passthrough:///bufconn", otel.Tracer("test/internal/transport/grpc/raft"), dialOpts...)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

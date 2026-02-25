@@ -2,30 +2,40 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	kvgrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/kv"
 )
 
 const usage = `Usage:
   client [--addr host:port[,host:port,...]] get <key>
+  client [--addr host:port[,host:port,...]] get-batch [--in <file|->]
   client [--addr host:port[,host:port,...]] put <key> <value>
+  client [--addr host:port[,host:port,...]] put-batch [--in <file|->]
   client [--addr host:port[,host:port,...]] delete <key>
+  client [--addr host:port[,host:port,...]] delete-batch [--in <file|->]
   client [--addr host:port[,host:port,...]] admin
 
 When multiple addresses are provided:
-  - get    uses a random node (read from any replica)
+ - get    uses a random node (read from any replica)
+ - get-batch reads many keys with one long-lived client (one key per line)
   - put    finds the leader automatically
+ - put-batch writes many key/value pairs with one long-lived client (TSV: key<TAB>value)
   - delete finds the leader automatically
+ - delete-batch deletes many keys with one long-lived client (one key per line)
   - admin  polls each admin gRPC endpoint and renders a live table
 
 Flags:
@@ -49,7 +59,7 @@ func run() error {
 	args := flag.Args()
 	if len(args) == 0 {
 		flag.Usage()
-		return fmt.Errorf("subcommand required: get | put | delete | admin")
+		return fmt.Errorf("subcommand required: get | get-batch | put | put-batch | delete | delete-batch | admin")
 	}
 
 	addrs := splitAddrs(*addr)
@@ -69,6 +79,23 @@ func run() error {
 		}
 		return cmdGet(ctx, client, args[1])
 
+	case "get-batch":
+		fs := flag.NewFlagSet("get-batch", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		inPath := fs.String("in", "-", "input path (one key per line), use - for stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return fmt.Errorf("usage: get-batch [--in <file|->]")
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: get-batch [--in <file|->]")
+		}
+		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+		return cmdGetBatch(client, *timeout, *inPath)
+
 	case "put":
 		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -83,6 +110,23 @@ func run() error {
 		}
 		return cmdPut(ctx, client, args[1], args[2])
 
+	case "put-batch":
+		fs := flag.NewFlagSet("put-batch", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		inPath := fs.String("in", "-", "TSV input path (key<TAB>value), use - for stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return fmt.Errorf("usage: put-batch [--in <file|->]")
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: put-batch [--in <file|->]")
+		}
+		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+		return cmdPutBatch(client, *timeout, *inPath)
+
 	case "delete":
 		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -96,6 +140,23 @@ func run() error {
 			return fmt.Errorf("usage: delete <key>")
 		}
 		return cmdDelete(ctx, client, args[1])
+
+	case "delete-batch":
+		fs := flag.NewFlagSet("delete-batch", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		inPath := fs.String("in", "-", "input path (one key per line), use - for stdin")
+		if err := fs.Parse(args[1:]); err != nil {
+			return fmt.Errorf("usage: delete-batch [--in <file|->]")
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: delete-batch [--in <file|->]")
+		}
+		client, err := kvgrpc.DialCluster(addrs, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+		return cmdDeleteBatch(client, *timeout, *inPath)
 
 	case "admin":
 		if len(args) != 1 {
@@ -144,6 +205,151 @@ func cmdDelete(ctx context.Context, c *kvgrpc.ClusterClient, key string) error {
 	}
 	fmt.Printf("ok (index %d)\n", index)
 	return nil
+}
+
+func cmdPutBatch(c *kvgrpc.ClusterClient, timeout time.Duration, inPath string) error {
+	var (
+		r   io.Reader = os.Stdin
+		f   *os.File
+		err error
+	)
+	if inPath != "-" {
+		// #nosec G304 -- CLI intentionally reads a user-provided local input file.
+		f, err = os.Open(inPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		r = f
+	}
+
+	scanner := bufio.NewScanner(r)
+	seq := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		seq++
+		key, value, ok := strings.Cut(line, "\t")
+		if !ok {
+			fmt.Printf("err\t%d\t0\t\tinvalid_tsv_line\n", seq)
+			continue
+		}
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		index, putErr := c.Put(ctx, key, value)
+		cancel()
+		ms := time.Since(start).Milliseconds()
+
+		switch {
+		case putErr == nil:
+			fmt.Printf("ok\t%d\t%d\t%d\t%s\n", seq, ms, index, key)
+		case errors.Is(putErr, context.DeadlineExceeded), status.Code(putErr) == codes.DeadlineExceeded:
+			fmt.Printf("timeout\t%d\t%d\t0\t%s\t%s\n", seq, ms, key, oneLineErr(putErr))
+		default:
+			fmt.Printf("err\t%d\t%d\t0\t%s\t%s\n", seq, ms, key, oneLineErr(putErr))
+		}
+	}
+	return scanner.Err()
+}
+
+func cmdGetBatch(c *kvgrpc.ClusterClient, timeout time.Duration, inPath string) error {
+	var (
+		r   io.Reader = os.Stdin
+		f   *os.File
+		err error
+	)
+	if inPath != "-" {
+		// #nosec G304 -- CLI intentionally reads a user-provided local input file.
+		f, err = os.Open(inPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		r = f
+	}
+
+	scanner := bufio.NewScanner(r)
+	seq := 0
+	for scanner.Scan() {
+		key := strings.TrimSpace(scanner.Text())
+		if key == "" {
+			continue
+		}
+		seq++
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		value, found, getErr := c.Get(ctx, key)
+		cancel()
+		us := time.Since(start).Microseconds()
+
+		if getErr == nil {
+			if found {
+				fmt.Printf("ok\t%d\t%d\t%s\t%d\n", seq, us, key, len(value))
+			} else {
+				fmt.Printf("notfound\t%d\t%d\t%s\t0\n", seq, us, key)
+			}
+			continue
+		}
+
+		switch {
+		case errors.Is(getErr, context.DeadlineExceeded), status.Code(getErr) == codes.DeadlineExceeded:
+			fmt.Printf("timeout\t%d\t%d\t%s\t%s\n", seq, us, key, oneLineErr(getErr))
+		default:
+			fmt.Printf("err\t%d\t%d\t%s\t%s\n", seq, us, key, oneLineErr(getErr))
+		}
+	}
+	return scanner.Err()
+}
+
+func cmdDeleteBatch(c *kvgrpc.ClusterClient, timeout time.Duration, inPath string) error {
+	var (
+		r   io.Reader = os.Stdin
+		f   *os.File
+		err error
+	)
+	if inPath != "-" {
+		// #nosec G304 -- CLI intentionally reads a user-provided local input file.
+		f, err = os.Open(inPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		r = f
+	}
+
+	scanner := bufio.NewScanner(r)
+	seq := 0
+	for scanner.Scan() {
+		key := strings.TrimSpace(scanner.Text())
+		if key == "" {
+			continue
+		}
+		seq++
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		index, delErr := c.Delete(ctx, key)
+		cancel()
+		ms := time.Since(start).Milliseconds()
+
+		switch {
+		case delErr == nil:
+			fmt.Printf("ok\t%d\t%d\t%d\t%s\n", seq, ms, index, key)
+		case errors.Is(delErr, context.DeadlineExceeded), status.Code(delErr) == codes.DeadlineExceeded:
+			fmt.Printf("timeout\t%d\t%d\t0\t%s\t%s\n", seq, ms, key, oneLineErr(delErr))
+		default:
+			fmt.Printf("err\t%d\t%d\t0\t%s\t%s\n", seq, ms, key, oneLineErr(delErr))
+		}
+	}
+	return scanner.Err()
+}
+
+func oneLineErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.ReplaceAll(err.Error(), "\n", " ")
 }
 
 func splitAddrs(raw string) []string {

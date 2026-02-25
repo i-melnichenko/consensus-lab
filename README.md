@@ -26,6 +26,10 @@ Raft-backed distributed KV store in Go. A `cmd/node` process exposes three gRPC 
 ## Documentation
 
 - [Raft implementation](docs/consensus/raft.md) — protocol logic (elections, replication, commit, safety) with code mapping
+- [Observability](docs/observability.md) — tracing, metrics, Jaeger/Prometheus/Grafana, pprof, dashboard usage
+- [CLI client](docs/client.md) — KV/Admin commands, routing semantics, batch modes, examples
+- [Benchmarking](docs/benchmark.md) — benchmark list, methodology, units, tuning vars
+- [Fault tolerance scenarios](docs/fault-tolerance.md) — failure/recovery scripts, scenarios, env vars, results
 
 ## Quick Start (Docker)
 
@@ -45,46 +49,22 @@ Docker Compose starts 5 nodes. Each node exposes a single host gRPC port (shared
 | node-4 | `:8084` |
 | node-5 | `:8085` |
 
+It also starts the local observability stack:
+
+- Jaeger UI: `http://localhost:16686`
+- Prometheus UI: `http://localhost:9090`
+- Grafana UI: `http://localhost:3000` (default `admin` / `admin`)
+
 ## CLI Client
 
-`--addr` accepts a comma-separated list of nodes. The client routes requests automatically:
-
-- **get** — picks a random node (distributes reads across replicas)
-- **put / delete** — tries all nodes until the leader accepts the write
-- **admin** — polls each admin endpoint and renders a live table (refresh every 500ms)
-
-Write semantics:
-
-- `put` / `delete` are acknowledged only after the command is **committed and applied**
-- if the cluster cannot reach quorum (or does not commit in time), the request fails by timeout
+CLI usage, routing semantics, batch commands (`put-batch` / `get-batch` / `delete-batch`) and admin dashboard examples are documented in [`docs/client.md`](docs/client.md).
 
 ```bash
-# point at the whole cluster — leader discovery is automatic
+# quick examples
 go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 put foo bar
 go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 get foo
-go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 delete foo
-
-# single node still works
-go run ./cmd/client --addr localhost:8081 get foo
-
-# live admin dashboard (same shared gRPC ports)
-go run ./cmd/client --addr localhost:8081,localhost:8082,localhost:8083,localhost:8084,localhost:8085 admin
-
-# same via Makefile
 make admin
-NODES=localhost:8081,localhost:8082,localhost:8083 make admin
-
-# inspect services with grpcurl (reflection enabled)
-grpcurl -plaintext localhost:8081 list
-grpcurl -plaintext -d '{}' localhost:8081 admin.v1.AdminService/GetNodeInfo
 ```
-
-Flags:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--addr` | `localhost:8080` | Comma-separated gRPC addresses for the selected mode (KV or Admin) |
-| `--timeout` | `5s` | Request timeout (for writes, includes waiting for commit/apply) |
 
 ## Run Node Manually
 
@@ -99,6 +79,11 @@ Environment variables:
 | `APP_DATA_DIR` | Local Raft storage directory |
 | `APP_PEERS` | Comma-separated peers (`id=host:port` or `host:port`). The node's own ID is ignored, so the full cluster list can be used on every node. |
 | `APP_SNAPSHOT_EVERY` | Trigger a snapshot after this many applied commands. `0` disables (default). |
+| `APP_METRICS_ADDR` | HTTP metrics listen address (Prometheus `/metrics`). Empty disables. |
+| `APP_TRACING_ENABLED` | Enable OpenTelemetry tracing export (`true` / `false`). |
+| `APP_TRACING_ENDPOINT` | OTLP/gRPC endpoint for trace export (for example `jaeger:4317`). |
+| `APP_TRACING_SERVICE_NAME` | Trace service name reported to the exporter (for example `consensus-node`). |
+| `APP_PPROF_ADDR` | HTTP `pprof` listen address. Empty disables (recommended by default). |
 
 3-node cluster example:
 
@@ -147,21 +132,15 @@ Run a single benchmark:
 ```bash
 make bench-write_latency
 make bench-read_latency
+make bench-delete_latency
 make bench-failover_time
 make bench-stale_reads
 make bench-slow_follower_recovery
 ```
 
-The script measures:
-
-- sequential write latency
-- follower-distributed read latency
-- parallel write throughput
-- leader failover time
-- stale follower reads (demonstrates non-linearizable follower reads without ReadIndex)
-- slow follower pause/resume recovery time (log backfill)
-
 Results are written to `.results/benchmark/*.txt`.
+
+Benchmark details are documented in [`docs/benchmark.md`](docs/benchmark.md).
 
 ## Fault Tolerance Scenarios
 
@@ -177,20 +156,7 @@ Open the live admin dashboard in another terminal while running scenarios/benchm
 make admin
 ```
 
-The script exercises:
-
-- baseline read/write
-- write availability with one follower down
-- leader failover and write recovery
-- quorum loss (writes must fail)
-- quorum restoration (writes resume)
-
-It also adds short pauses around stop/start transitions so changes are easier to observe in the admin dashboard.
-
-Useful env vars:
-
-- `OBSERVE_SLEEP` — pause duration in seconds between state transitions (default `2`)
-- `FT_BULK_WRITES` — number of writes used in bulk checks (default `25`)
+Fault tolerance scenario details (scenario list, semantics, env vars, results) are documented in [`docs/fault-tolerance.md`](docs/fault-tolerance.md).
 
 Implementation scripts are located in `scripts/`:
 
@@ -206,7 +172,6 @@ Notes:
 
 - Numbers are highly environment-dependent (laptop model, Docker runtime, local CPU load, background processes).
 - Tail latency (`p95`/`p99`) can vary noticeably between runs because of scheduler jitter and GC.
-- Benchmarks include simple retries for some setup writes to reduce flaky failures during transient leader changes.
 
 ## Requirements
 

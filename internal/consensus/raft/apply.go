@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 )
 
@@ -40,14 +42,25 @@ func (n *Node) runApplyLoop(ctx context.Context) {
 				"snapshot_term", snap.LastIncludedTerm,
 			)
 
+			applyCtx, span := n.startSpan(
+				ctx,
+				"raft.node.applySnapshot",
+				attribute.Int64("raft.snapshot.index", snap.LastIncludedIndex),
+				attribute.Int64("raft.snapshot.term", snap.LastIncludedTerm),
+				attribute.Int("raft.snapshot.bytes", len(snap.Data)),
+			)
+
 			select {
-			case <-ctx.Done():
+			case <-applyCtx.Done():
+				span.End()
 				return
 			case n.applyCh <- consensus.ApplyMsg{
 				SnapshotValid: true,
 				Snapshot:      append([]byte(nil), snap.Data...),
 				SnapshotIndex: snap.LastIncludedIndex,
 			}:
+				span.SetAttributes(attribute.Bool("raft.apply.sent", true))
+				span.End()
 			}
 
 			// Advance lastApplied to the snapshot index so the loop below
@@ -56,7 +69,10 @@ func (n *Node) runApplyLoop(ctx context.Context) {
 			if snap.LastIncludedIndex > n.lastApplied {
 				n.lastApplied = snap.LastIncludedIndex
 			}
-			n.lastAppliedAt = time.Now()
+			now := time.Now()
+			n.lastAppliedAt = now
+			n.observeCommitToApplyLocked(n.lastApplied, now)
+			n.metrics.SetRaftApplyLag(n.id, n.commitIndex-n.lastApplied)
 			n.mu.Unlock()
 		}
 
@@ -76,6 +92,7 @@ func (n *Node) runApplyLoop(ctx context.Context) {
 
 			entry := n.entryAtLocked(nextIndex)
 			n.lastApplied = nextIndex
+			n.metrics.SetRaftApplyLag(n.id, n.commitIndex-n.lastApplied)
 			n.mu.Unlock()
 
 			n.logger.Debug("applying log entry",
@@ -84,16 +101,30 @@ func (n *Node) runApplyLoop(ctx context.Context) {
 				"term", entry.Term,
 			)
 
+			applyCtx, span := n.startSpan(
+				ctx,
+				"raft.node.applyEntry",
+				attribute.Int64("raft.log.index", nextIndex),
+				attribute.Int64("raft.term", entry.Term),
+				attribute.Int("raft.command.bytes", len(entry.Command)),
+			)
+
 			select {
-			case <-ctx.Done():
+			case <-applyCtx.Done():
+				span.End()
 				return
 			case n.applyCh <- consensus.ApplyMsg{
 				CommandValid: true,
 				Command:      append([]byte(nil), entry.Command...),
 				CommandIndex: nextIndex,
 			}:
+				span.SetAttributes(attribute.Bool("raft.apply.sent", true))
+				span.End()
 				n.mu.Lock()
-				n.lastAppliedAt = time.Now()
+				now := time.Now()
+				n.lastAppliedAt = now
+				n.observeCommitToApplyLocked(n.lastApplied, now)
+				n.metrics.SetRaftApplyLag(n.id, n.commitIndex-n.lastApplied)
 				n.mu.Unlock()
 			}
 		}

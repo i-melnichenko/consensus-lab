@@ -4,6 +4,8 @@ import (
 	"context"
 	"math/rand"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (n *Node) runFollower(ctx context.Context) {
@@ -44,7 +46,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 	n.currentTerm++
 	term := n.currentTerm
 	n.votedFor = n.id
-	if err := n.persistHardStateLocked(); err != nil {
+	if err := n.tracePersistHardStateLocked(ctx, "candidate_start_election"); err != nil {
 		n.markDegradedLocked(err)
 		n.currentTerm = prevTerm
 		n.votedFor = prevVotedFor
@@ -55,6 +57,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 	lastLogIndex := n.lastLogIndexLocked()
 	lastLogTerm := n.lastLogTermLocked()
 	n.mu.Unlock()
+	n.metrics.IncRaftElectionStarted(n.id)
 
 	n.logger.Debug("starting election",
 		"node_id", n.id,
@@ -74,6 +77,16 @@ func (n *Node) runCandidate(ctx context.Context) {
 
 	for peerID, peerClient := range n.peers {
 		go func(id string, pc PeerClient) {
+			rpcCtx, span := n.startSpan(
+				ctx,
+				"raft.node.sendRequestVote",
+				attribute.String("raft.peer_id", id),
+				attribute.Int64("raft.term", term),
+				attribute.Int64("raft.last_log_index", lastLogIndex),
+				attribute.Int64("raft.last_log_term", lastLogTerm),
+			)
+			defer span.End()
+
 			n.logger.Debug("requesting vote",
 				"node_id", n.id,
 				"term", term,
@@ -87,8 +100,9 @@ func (n *Node) runCandidate(ctx context.Context) {
 				LastLogTerm:  lastLogTerm,
 			}
 
-			resp, err := pc.RequestVote(ctx, req)
+			resp, err := pc.RequestVote(rpcCtx, req)
 			if err != nil {
+				spanRecordError(span, err)
 				n.logger.Debug("vote request failed",
 					"node_id", n.id,
 					"term", term,
@@ -97,6 +111,10 @@ func (n *Node) runCandidate(ctx context.Context) {
 				)
 				return
 			}
+			span.SetAttributes(
+				attribute.Int64("raft.response_term", resp.Term),
+				attribute.Bool("raft.vote_granted", resp.VoteGranted),
+			)
 
 			select {
 			case voteCh <- resp:
@@ -108,8 +126,10 @@ func (n *Node) runCandidate(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			n.metrics.IncRaftElectionLost(n.id, "context_canceled")
 			return
 		case <-timer.C():
+			n.metrics.IncRaftElectionLost(n.id, "timeout")
 			n.logger.Debug("election timed out, restarting",
 				"node_id", n.id,
 				"term", term,
@@ -119,6 +139,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 
 			n.mu.Lock()
 			if resp.Term > n.currentTerm {
+				n.metrics.IncRaftElectionLost(n.id, "higher_term")
 				n.logger.Debug("stepping down: higher term seen during election",
 					"node_id", n.id,
 					"current_term", n.currentTerm,
@@ -127,7 +148,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 				n.currentTerm = resp.Term
 				n.votedFor = ""
 				n.role = Follower
-				if err := n.persistHardStateLocked(); err != nil {
+				if err := n.tracePersistHardStateLocked(ctx, "candidate_step_down_higher_term"); err != nil {
 					n.markDegradedLocked(err)
 				}
 				n.mu.Unlock()
@@ -154,6 +175,7 @@ func (n *Node) runCandidate(ctx context.Context) {
 			}
 
 			if votes >= majority {
+				n.metrics.IncRaftElectionWon(n.id)
 				n.logger.Debug("won election, becoming leader",
 					"node_id", n.id,
 					"term", term,

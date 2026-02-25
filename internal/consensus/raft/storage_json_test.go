@@ -15,7 +15,7 @@ func TestNodeWithJSONStorage_PersistsAndLoadsState(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "raft")
 	storage := NewJSONStorage(dir)
 
-	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), storage, slog.Default())
+	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), storage, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
@@ -43,7 +43,7 @@ func TestNodeWithJSONStorage_PersistsAndLoadsState(t *testing.T) {
 		t.Fatalf("HandleRequestVote() error = %v", err)
 	}
 
-	restored, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), storage, slog.Default())
+	restored, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), storage, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("restore NewNode() error = %v", err)
 	}

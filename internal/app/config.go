@@ -21,8 +21,14 @@ type Config struct {
 	ConsensusType ConsensusType
 	LogLevel      string
 
-	GRPCAddr string
-	DataDir  string
+	TracingEnabled     bool
+	TracingEndpoint    string
+	TracingServiceName string
+
+	GRPCAddr    string
+	MetricsAddr string
+	PprofAddr   string
+	DataDir     string
 
 	PeerAddrs []string
 
@@ -34,11 +40,13 @@ type Config struct {
 // DefaultConfig returns a local-development configuration.
 func DefaultConfig() Config {
 	return Config{
-		NodeID:        "node-1",
-		ConsensusType: ConsensusTypeRaft,
-		LogLevel:      "info",
-		GRPCAddr:      ":8080",
-		DataDir:       "./var/node-1",
+		NodeID:             "node-1",
+		ConsensusType:      ConsensusTypeRaft,
+		LogLevel:           "info",
+		TracingServiceName: "consensus-node",
+		GRPCAddr:           ":8080",
+		MetricsAddr:        ":9090",
+		DataDir:            "./var/node-1",
 	}
 }
 
@@ -48,7 +56,12 @@ func DefaultConfig() Config {
 // - APP_NODE_ID
 // - APP_CONSENSUS_TYPE (must be "raft")
 // - APP_LOG_LEVEL (debug|info|warn|error)
+// - APP_TRACING_ENABLED (bool)
+// - APP_TRACING_ENDPOINT (OTLP gRPC endpoint, e.g. "jaeger:4317")
+// - APP_TRACING_SERVICE_NAME
 // - APP_GRPC_ADDR
+// - APP_METRICS_ADDR (HTTP /metrics endpoint; empty disables)
+// - APP_PPROF_ADDR (HTTP net/http/pprof endpoint; empty disables)
 // - APP_DATA_DIR
 // - APP_PEERS (comma-separated addresses)
 // - APP_SNAPSHOT_EVERY (uint, 0 = disabled)
@@ -64,8 +77,27 @@ func LoadConfigFromEnv() (Config, error) {
 	if v := strings.TrimSpace(os.Getenv("APP_LOG_LEVEL")); v != "" {
 		cfg.LogLevel = strings.ToLower(v)
 	}
+	if v := strings.TrimSpace(os.Getenv("APP_TRACING_ENABLED")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("app: invalid APP_TRACING_ENABLED %q: %w", v, err)
+		}
+		cfg.TracingEnabled = b
+	}
+	if v := strings.TrimSpace(os.Getenv("APP_TRACING_ENDPOINT")); v != "" {
+		cfg.TracingEndpoint = v
+	}
+	if v := strings.TrimSpace(os.Getenv("APP_TRACING_SERVICE_NAME")); v != "" {
+		cfg.TracingServiceName = v
+	}
 	if v := strings.TrimSpace(os.Getenv("APP_GRPC_ADDR")); v != "" {
 		cfg.GRPCAddr = v
+	}
+	if v, ok := os.LookupEnv("APP_METRICS_ADDR"); ok {
+		cfg.MetricsAddr = strings.TrimSpace(v)
+	}
+	if v, ok := os.LookupEnv("APP_PPROF_ADDR"); ok {
+		cfg.PprofAddr = strings.TrimSpace(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("APP_DATA_DIR")); v != "" {
 		cfg.DataDir = v
@@ -105,8 +137,18 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.GRPCAddr) == "" {
 		return fmt.Errorf("app: grpc addr is required")
 	}
+	// MetricsAddr may be empty to disable the metrics endpoint.
+	// PprofAddr may be empty to disable the pprof endpoint.
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("app: data dir is required")
+	}
+	if c.TracingEnabled {
+		if strings.TrimSpace(c.TracingEndpoint) == "" {
+			return fmt.Errorf("app: tracing endpoint is required when tracing is enabled")
+		}
+		if strings.TrimSpace(c.TracingServiceName) == "" {
+			return fmt.Errorf("app: tracing service name is required when tracing is enabled")
+		}
 	}
 	return nil
 }
