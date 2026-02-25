@@ -10,7 +10,7 @@ import (
 )
 
 func TestNode_HandleAppendEntries_HeartbeatOnEmptyLog(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.currentTerm = 2
 	n.role = Candidate
 
@@ -37,7 +37,7 @@ func TestNode_HandleAppendEntries_HeartbeatOnEmptyLog(t *testing.T) {
 }
 
 func TestNode_HandleRequestVote_ReturnsErrNodeDegraded(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.degraded = true
 
 	resp, err := n.HandleRequestVote(context.Background(), &RequestVoteRequest{})
@@ -50,7 +50,7 @@ func TestNode_HandleRequestVote_ReturnsErrNodeDegraded(t *testing.T) {
 }
 
 func TestNode_HandleAppendEntries_ReturnsErrNodeDegraded(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.degraded = true
 
 	resp, err := n.HandleAppendEntries(context.Background(), &AppendEntriesRequest{})
@@ -63,7 +63,7 @@ func TestNode_HandleAppendEntries_ReturnsErrNodeDegraded(t *testing.T) {
 }
 
 func TestNode_HandleRequestVote_EmptyLogCandidateIsUpToDate(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.currentTerm = 3
 
 	resp, err := n.HandleRequestVote(context.Background(), &RequestVoteRequest{
@@ -84,7 +84,7 @@ func TestNode_HandleRequestVote_EmptyLogCandidateIsUpToDate(t *testing.T) {
 }
 
 func TestNode_HandleRequestVote_RejectsOutdatedLog(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.currentTerm = 3
 	n.log = []LogEntry{
 		{Term: 1},
@@ -106,7 +106,7 @@ func TestNode_HandleRequestVote_RejectsOutdatedLog(t *testing.T) {
 }
 
 func TestNode_HandleAppendEntries_ReturnsConflictIndexWhenPrevTooHigh(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.currentTerm = 4
 	n.log = []LogEntry{{Term: 1}, {Term: 2}}
 
@@ -131,7 +131,7 @@ func TestNode_HandleAppendEntries_ReturnsConflictIndexWhenPrevTooHigh(t *testing
 }
 
 func TestNode_HandleAppendEntries_ReturnsConflictTermAndFirstIndexOnMismatch(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.currentTerm = 4
 	n.log = []LogEntry{
 		{Term: 1},
@@ -161,7 +161,7 @@ func TestNode_HandleAppendEntries_ReturnsConflictTermAndFirstIndexOnMismatch(t *
 }
 
 func TestNode_HandleAppendEntries_UpdatesCommitIndexAndNotifiesApply(t *testing.T) {
-	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), NewInMemoryStorage(), slog.Default())
+	n, _ := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	n.currentTerm = 5
 	n.log = []LogEntry{
 		{Term: 4},

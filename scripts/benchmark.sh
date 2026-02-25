@@ -244,6 +244,30 @@ percentiles() {
     }'
 }
 
+percentiles_us() {
+    local n="$1"
+    if [[ "$n" -le 0 ]]; then
+        echo "  no successful samples"
+        return 0
+    fi
+    sort -n | awk -v n="$n" '
+    {
+        a[NR] = $1
+        sum += $1
+    }
+    END {
+        p50 = a[int(n*0.50)+1]
+        p95 = a[int(n*0.95)+1]
+        p99 = a[int(n*0.99)+1]
+        p999_idx = int(n*0.999)+1
+        if (p999_idx < 1) p999_idx = 1
+        if (p999_idx > n) p999_idx = n
+        p999 = a[p999_idx]
+        max = a[n]
+        printf "  median=%dus  p95=%dus  p99=%dus  p99.9=%dus  max=%dus  avg=%.1fus\n", p50, p95, p99, p999, max, sum/n
+    }'
+}
+
 # =============================================================================
 # 1. WRITE LATENCY
 # =============================================================================
@@ -260,11 +284,13 @@ bench_write_latency() {
     local target_desc="cluster-routing"
     local leader_addr=""
     local slow_samples=()
+    local target_addrs="$NODES"
 
     if [[ "${PIN_LEADER}" == "1" ]]; then
         leader_addr="$(detect_leader_addr || true)"
         if [[ -n "$leader_addr" ]]; then
             target_desc="leader-pinned($leader_addr)"
+            target_addrs="$leader_addr"
             log "  Write target: $target_desc"
         else
             log "  Write target: cluster-routing (leader detection failed)"
@@ -275,50 +301,54 @@ bench_write_latency() {
 
     if [[ "$WARMUP" -gt 0 ]]; then
         log "  Warmup: ${WARMUP} sequential puts (excluded from stats)"
-        for i in $(seq 1 "$WARMUP"); do
-            local key="bench:lat:warmup:$RUN_ID:$i"
-            progress "  warmup: ${i}/${WARMUP} (put ${key})"
-            if [[ -n "$leader_addr" ]]; then
-                if run_client_node_raw "$leader_addr" put "$key" "value-$i" > /dev/null 2>&1; then
-                    (( warmup_ok++ )) || true
-                else
-                    (( warmup_fail++ )) || true
-                fi
-            elif run_client_raw put "$key" "value-$i" > /dev/null 2>&1; then
+        local warmup_output=""
+        warmup_output="$(
+            {
+                for i in $(seq 1 "$WARMUP"); do
+                    local key="bench:lat:warmup:$RUN_ID:$i"
+                    printf '%s\t%s\n' "$key" "value-$i"
+                done
+            } | "$CLIENT_BIN" --addr "$target_addrs" --timeout "$TIMEOUT" put-batch --in - 2>/dev/null
+        )" || true
+        while IFS=$'\t' read -r status _seq _ms _idx _key _rest; do
+            [[ -z "${status:-}" ]] && continue
+            if [[ "$status" == "ok" ]]; then
                 (( warmup_ok++ )) || true
             else
                 (( warmup_fail++ )) || true
             fi
-        done
+        done <<< "$warmup_output"
         echo
         log "  Warmup done (ok=$warmup_ok failed=$warmup_fail)"
     fi
 
-    for i in $(seq 1 $N); do
-        local key="bench:lat:$RUN_ID:$i"
-        progress "  progress: ${i}/${N} (put ${key})"
-        if [[ -n "$leader_addr" ]]; then
-            measure_op run_client_node_raw "$leader_addr" put "$key" "value-$i" || true
-        else
-            measure_op run_client_raw put "$key" "value-$i" || true
-        fi
-        if [[ "$MEASURE_OK" -eq 1 ]]; then
-            times+=("$MEASURE_MS")
+    local batch_output=""
+    batch_output="$(
+        {
+            for i in $(seq 1 "$N"); do
+                printf '%s\t%s\n' "bench:lat:$RUN_ID:$i" "value-$i"
+            done
+        } | "$CLIENT_BIN" --addr "$target_addrs" --timeout "$TIMEOUT" put-batch --in - 2>/dev/null
+    )" || true
+    while IFS=$'\t' read -r status seq ms _idx _key _rest; do
+        [[ -z "${status:-}" ]] && continue
+        if [[ "$status" == "ok" ]]; then
+            times+=("$ms")
             (( ok_count++ )) || true
-            if [[ "$MEASURE_MS" -ge "$SLOW_MS" ]]; then
-                slow_samples+=("${i}:${MEASURE_MS}")
+            if [[ "$ms" -ge "$SLOW_MS" ]]; then
+                slow_samples+=("${seq}:${ms}")
             fi
-            progress "  progress: ${i}/${N} (ok last=${MEASURE_MS}ms)"
+            progress "  progress: ${seq}/${N} (ok last=${ms}ms)"
         else
             (( fail_count++ )) || true
-            if [[ "$MEASURE_TIMEOUT" -eq 1 ]]; then
+            if [[ "$status" == "timeout" ]]; then
                 (( timeout_count++ )) || true
-                progress "  progress: ${i}/${N} (timeout ${MEASURE_MS}ms)"
+                progress "  progress: ${seq}/${N} (timeout ${ms}ms)"
             else
-                progress "  progress: ${i}/${N} (err ${MEASURE_MS}ms)"
+                progress "  progress: ${seq}/${N} (err ${ms}ms)"
             fi
         fi
-    done
+    done <<< "$batch_output"
     echo
 
     if [[ ${#times[@]} -gt 0 ]]; then
@@ -342,54 +372,190 @@ bench_write_latency() {
 bench_read_latency() {
     sep
     log "BENCHMARK 2 — Read Latency (follower-distributed gets)"
-    local N=100
+    local N="${BENCH_READ_LATENCY_N:-1000}"
+    local SLOW_US="${BENCH_READ_LATENCY_SLOW_US:-10000}"
     local times=()
     local ok_count=0 fail_count=0 timeout_count=0
+    local slow_samples=()
 
     log "  Pre-populating $N keys..."
-    for i in $(seq 1 $N); do
-        local key="bench:read:$i"
-        progress "  pre-populate: ${i}/${N} (put ${key})"
-        retry_run_client_put "$key" "value-$i"
-        progress "  pre-populate: ${i}/${N} (done)"
-    done
+    local prepopulate_target="$NODES"
+    local prepopulate_leader=""
+    prepopulate_leader="$(detect_leader_addr || true)"
+    if [[ -n "$prepopulate_leader" ]]; then
+        prepopulate_target="$prepopulate_leader"
+    fi
+    local prepopulate_output=""
+    prepopulate_output="$(
+        {
+            for i in $(seq 1 "$N"); do
+                printf '%s\t%s\n' "bench:read:$i" "value-$i"
+            done
+        } | "$CLIENT_BIN" --addr "$prepopulate_target" --timeout "$TIMEOUT" put-batch --in - 2>/dev/null
+    )" || true
+    local pre_ok=0 pre_fail=0
+    while IFS=$'\t' read -r status seq _ms _idx _key _rest; do
+        [[ -z "${status:-}" ]] && continue
+        if [[ "$status" == "ok" ]]; then
+            (( pre_ok++ )) || true
+            progress "  pre-populate: ${seq}/${N} (done)"
+        else
+            (( pre_fail++ )) || true
+            progress "  pre-populate: ${seq}/${N} (err)"
+        fi
+    done <<< "$prepopulate_output"
     echo
+    if [[ "$pre_fail" -gt 0 ]]; then
+        fail "read-latency pre-populate failed for ${pre_fail}/${N} keys"
+    fi
 
-    for i in $(seq 1 $N); do
-        local key="bench:read:$i"
-        progress "  progress: ${i}/${N} (get ${key})"
-        measure_op run_client_raw get "$key" || true
-        if [[ "$MEASURE_OK" -eq 1 ]]; then
-            times+=("$MEASURE_MS")
+    local batch_output=""
+    batch_output="$(
+        {
+            for i in $(seq 1 "$N"); do
+                printf '%s\n' "bench:read:$i"
+            done
+        } | "$CLIENT_BIN" --addr "$NODES" --timeout "$TIMEOUT" get-batch --in - 2>/dev/null
+    )" || true
+    while IFS=$'\t' read -r status seq us _key _rest; do
+        [[ -z "${status:-}" ]] && continue
+        if [[ "$status" == "ok" ]]; then
+            times+=("$us")
             (( ok_count++ )) || true
-            progress "  progress: ${i}/${N} (ok last=${MEASURE_MS}ms)"
+            if [[ "$us" -ge "$SLOW_US" ]]; then
+                slow_samples+=("${seq}:${us}")
+            fi
+            progress "  progress: ${seq}/${N} (ok last=${us}us)"
         else
             (( fail_count++ )) || true
-            if [[ "$MEASURE_TIMEOUT" -eq 1 ]]; then
+            if [[ "$status" == "timeout" ]]; then
                 (( timeout_count++ )) || true
-                progress "  progress: ${i}/${N} (timeout ${MEASURE_MS}ms)"
+                progress "  progress: ${seq}/${N} (timeout ${us}us)"
             else
-                progress "  progress: ${i}/${N} (err ${MEASURE_MS}ms)"
+                progress "  progress: ${seq}/${N} (err ${us}us)"
             fi
         fi
-    done
+    done <<< "$batch_output"
     echo
 
     if [[ ${#times[@]} -gt 0 ]]; then
-        printf '%s\n' "${times[@]}" | percentiles "${#times[@]}" | tee "$RESULTS_DIR/read_latency.txt"
+        printf '%s\n' "${times[@]}" | percentiles_us "${#times[@]}" | tee "$RESULTS_DIR/read_latency.txt"
     else
         echo "  no successful samples" | tee "$RESULTS_DIR/read_latency.txt"
     fi
+    if [[ ${#slow_samples[@]} -gt 0 ]]; then
+        printf "  slow_samples(>=%sus): %s\n" "$SLOW_US" "${slow_samples[*]}" | tee -a "$RESULTS_DIR/read_latency.txt"
+    else
+        echo "  slow_samples(>=${SLOW_US}us): none" | tee -a "$RESULTS_DIR/read_latency.txt"
+    fi
+    echo "  config: measured_n=$N slow_us=$SLOW_US run_id=$RUN_ID" | tee -a "$RESULTS_DIR/read_latency.txt"
     echo "  total=$N  ok=$ok_count  failed=$fail_count  timeouts=$timeout_count" | tee -a "$RESULTS_DIR/read_latency.txt"
     ok "done — results in $RESULTS_DIR/read_latency.txt"
 }
 
 # =============================================================================
-# 3. WRITE THROUGHPUT
+# 3. DELETE LATENCY
+# =============================================================================
+bench_delete_latency() {
+    sep
+    log "BENCHMARK 3 — Delete Latency (sequential deletes)"
+    local N="${BENCH_DELETE_LATENCY_N:-1000}"
+    local SLOW_MS="${BENCH_DELETE_LATENCY_SLOW_MS:-200}"
+    local times=()
+    local ok_count=0 fail_count=0 timeout_count=0
+    local slow_samples=()
+
+    log "  Pre-populating $N keys to delete..."
+    local prepopulate_target="$NODES"
+    local prepopulate_leader=""
+    prepopulate_leader="$(detect_leader_addr || true)"
+    if [[ -n "$prepopulate_leader" ]]; then
+        prepopulate_target="$prepopulate_leader"
+    fi
+    local prepopulate_output=""
+    prepopulate_output="$(
+        {
+            for i in $(seq 1 "$N"); do
+                printf '%s\t%s\n' "bench:del:$RUN_ID:$i" "value-$i"
+            done
+        } | "$CLIENT_BIN" --addr "$prepopulate_target" --timeout "$TIMEOUT" put-batch --in - 2>/dev/null
+    )" || true
+    local pre_ok=0 pre_fail=0
+    while IFS=$'\t' read -r status seq _ms _idx _key _rest; do
+        [[ -z "${status:-}" ]] && continue
+        if [[ "$status" == "ok" ]]; then
+            (( pre_ok++ )) || true
+            progress "  pre-populate: ${seq}/${N} (done)"
+        else
+            (( pre_fail++ )) || true
+            progress "  pre-populate: ${seq}/${N} (err)"
+        fi
+    done <<< "$prepopulate_output"
+    echo
+    if [[ "$pre_fail" -gt 0 ]]; then
+        fail "delete-latency pre-populate failed for ${pre_fail}/${N} keys"
+    fi
+
+    local leader_addr=""
+    leader_addr="$(detect_leader_addr || true)"
+    local target_addrs="$NODES"
+    local target_desc="cluster-routing"
+    if [[ -n "$leader_addr" ]]; then
+        target_addrs="$leader_addr"
+        target_desc="leader-pinned($leader_addr)"
+    fi
+    log "  Delete target: $target_desc"
+
+    local batch_output=""
+    batch_output="$(
+        {
+            for i in $(seq 1 "$N"); do
+                printf '%s\n' "bench:del:$RUN_ID:$i"
+            done
+        } | "$CLIENT_BIN" --addr "$target_addrs" --timeout "$TIMEOUT" delete-batch --in - 2>/dev/null
+    )" || true
+    while IFS=$'\t' read -r status seq ms _idx _key _rest; do
+        [[ -z "${status:-}" ]] && continue
+        if [[ "$status" == "ok" ]]; then
+            times+=("$ms")
+            (( ok_count++ )) || true
+            if [[ "$ms" -ge "$SLOW_MS" ]]; then
+                slow_samples+=("${seq}:${ms}")
+            fi
+            progress "  progress: ${seq}/${N} (ok last=${ms}ms)"
+        else
+            (( fail_count++ )) || true
+            if [[ "$status" == "timeout" ]]; then
+                (( timeout_count++ )) || true
+                progress "  progress: ${seq}/${N} (timeout ${ms}ms)"
+            else
+                progress "  progress: ${seq}/${N} (err ${ms}ms)"
+            fi
+        fi
+    done <<< "$batch_output"
+    echo
+
+    if [[ ${#times[@]} -gt 0 ]]; then
+        printf '%s\n' "${times[@]}" | percentiles "${#times[@]}" | tee "$RESULTS_DIR/delete_latency.txt"
+    else
+        echo "  no successful samples" | tee "$RESULTS_DIR/delete_latency.txt"
+    fi
+    if [[ ${#slow_samples[@]} -gt 0 ]]; then
+        printf "  slow_samples(>=%sms): %s\n" "$SLOW_MS" "${slow_samples[*]}" | tee -a "$RESULTS_DIR/delete_latency.txt"
+    else
+        echo "  slow_samples(>=${SLOW_MS}ms): none" | tee -a "$RESULTS_DIR/delete_latency.txt"
+    fi
+    echo "  config: measured_n=$N slow_ms=$SLOW_MS target=$target_desc run_id=$RUN_ID" | tee -a "$RESULTS_DIR/delete_latency.txt"
+    echo "  total=$N  ok=$ok_count  failed=$fail_count  timeouts=$timeout_count" | tee -a "$RESULTS_DIR/delete_latency.txt"
+    ok "done — results in $RESULTS_DIR/delete_latency.txt"
+}
+
+# =============================================================================
+# 4. WRITE THROUGHPUT
 # =============================================================================
 bench_write_throughput() {
     sep
-    log "BENCHMARK 3 — Write Throughput (parallel puts)"
+    log "BENCHMARK 4 — Write Throughput (parallel puts)"
     local N=200
     local CONCURRENCY=10
     local BATCH=$(( N / CONCURRENCY ))
@@ -403,18 +569,20 @@ bench_write_throughput() {
         log "  Throughput target: cluster-routing (leader detection failed)"
     fi
 
-    log "  Launching $CONCURRENCY workers × $BATCH writes..."
+    log "  Launching $CONCURRENCY workers × $BATCH writes (batch client per worker)..."
     start=$(date +%s%N)
     for w in $(seq 1 $CONCURRENCY); do
         (
-            for i in $(seq 1 $BATCH); do
-                printf "\r\033[2K  worker %d/%d (put %d/%d)" "$w" "$CONCURRENCY" "$i" "$BATCH" >&2
-                if [[ -n "$throughput_leader_addr" ]]; then
-                    run_client_node "$throughput_leader_addr" put "bench:thr:w${w}:$i" "v" > /dev/null
-                else
-                    run_client put "bench:thr:w${w}:$i" "v" > /dev/null
-                fi
-            done
+            local worker_target="$NODES"
+            if [[ -n "$throughput_leader_addr" ]]; then
+                worker_target="$throughput_leader_addr"
+            fi
+            {
+                for i in $(seq 1 "$BATCH"); do
+                    printf '%s\t%s\n' "bench:thr:w${w}:$i" "v"
+                done
+            } | "$CLIENT_BIN" --addr "$worker_target" --timeout "$TIMEOUT" put-batch --in - > /dev/null
+            printf "\r\033[2K  worker %d/%d (done %d writes)\n" "$w" "$CONCURRENCY" "$BATCH" >&2
         ) &
     done
     wait
@@ -430,11 +598,11 @@ bench_write_throughput() {
 }
 
 # =============================================================================
-# 4. LEADER FAILOVER TIME
+# 5. LEADER FAILOVER TIME
 # =============================================================================
 bench_failover_time() {
     sep
-    log "BENCHMARK 4 — Leader Failover Time"
+    log "BENCHMARK 5 — Leader Failover Time"
 
     run_client put failover:canary before > /dev/null
     ok "cluster healthy before test"
@@ -500,11 +668,11 @@ bench_failover_time() {
 }
 
 # =============================================================================
-# 5. STALE READ DETECTION
+# 6. STALE READ DETECTION
 # =============================================================================
 bench_stale_reads() {
     sep
-    log "BENCHMARK 5 — Stale Read Detection"
+    log "BENCHMARK 6 — Stale Read Detection"
     local N=50
     local stale_count=0
     local read_timeout="1s"
@@ -556,11 +724,11 @@ bench_stale_reads() {
 }
 
 # =============================================================================
-# 6. SLOW FOLLOWER RECOVERY
+# 7. SLOW FOLLOWER RECOVERY
 # =============================================================================
 bench_slow_follower_recovery() {
     sep
-    log "BENCHMARK 6 — Slow Follower Recovery (log backfill)"
+    log "BENCHMARK 7 — Slow Follower Recovery (log backfill)"
 
     # Pause node-3 — || true prevents set -e from killing the script
     log "  Pausing node-3..."
@@ -683,6 +851,7 @@ main() {
     if [[ $# -eq 0 ]]; then
         bench_write_latency
         bench_read_latency
+        bench_delete_latency
         bench_write_throughput
         bench_failover_time
         bench_stale_reads

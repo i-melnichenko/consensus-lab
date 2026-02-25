@@ -317,7 +317,7 @@ func TestNewNode_RestoredSnapshot_IsDeliveredToApplyLoopOnStartup(t *testing.T) 
 	_ = storage.SaveSnapshot(snap)
 
 	applyCh := make(chan consensus.ApplyMsg, 1)
-	n, err := NewNode("n1", map[string]PeerClient{}, applyCh, storage, slog.Default())
+	n, err := NewNode("n1", map[string]PeerClient{}, applyCh, storage, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}

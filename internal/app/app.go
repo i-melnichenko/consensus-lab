@@ -6,7 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
@@ -81,6 +85,18 @@ func (a *App) Stop() {
 
 // Run starts consensus and a shared gRPC server and blocks until shutdown or fatal error.
 func (a *App) Run(ctx context.Context) error {
+	shutdownTracing, err := a.initTracing(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			a.logger.Warn("tracing shutdown failed", "error", err)
+		}
+	}()
+
 	a.consensus.Run(ctx)
 
 	lis, err := net.Listen("tcp", a.config.GRPCAddr)
@@ -102,13 +118,32 @@ func (a *App) Run(ctx context.Context) error {
 // serve registers gRPC services, starts goroutines, and blocks until ctx is
 // canceled or a fatal error occurs.
 func (a *App) serve(ctx context.Context, lis net.Listener) error {
-	server := grpc.NewServer()
-	kvpb.RegisterKVServiceServer(server, kvgrpc.NewServer(a.kv))
+	server := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	kvpb.RegisterKVServiceServer(server, kvgrpc.NewServer(a.kv, otel.Tracer("consensus-lab/internal/transport/grpc/kv")))
 	adminpb.RegisterAdminServiceServer(server, a.adminSrv)
 	raftpb.RegisterRaftServiceServer(server, a.raftSrv)
 	reflection.Register(server)
 
-	errCh := make(chan error, 2)
+	metricsSrv, metricsLis, err := a.metricsServer()
+	if err != nil {
+		return err
+	}
+	if metricsSrv != nil {
+		a.logger.Info("metrics endpoint enabled", "addr", a.config.MetricsAddr, "path", "/metrics")
+		defer func() { _ = metricsLis.Close() }()
+		defer shutdownHTTPServer(metricsSrv, a.logger, "metrics server")
+	}
+	pprofSrv, pprofLis, err := a.pprofServer()
+	if err != nil {
+		return err
+	}
+	if pprofSrv != nil {
+		a.logger.Info("pprof endpoint enabled", "addr", a.config.PprofAddr, "path", "/debug/pprof/")
+		defer func() { _ = pprofLis.Close() }()
+		defer shutdownHTTPServer(pprofSrv, a.logger, "pprof server")
+	}
+
+	errCh := make(chan error, 4)
 
 	go func() {
 		if err := a.kv.RunApplyLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -120,12 +155,38 @@ func (a *App) serve(ctx context.Context, lis net.Listener) error {
 			errCh <- fmt.Errorf("grpc serve: %w", err)
 		}
 	}()
+	if metricsSrv != nil {
+		go func() {
+			if err := metricsSrv.Serve(metricsLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("metrics serve: %w", err)
+			}
+		}()
+	}
+	if pprofSrv != nil {
+		go func() {
+			if err := pprofSrv.Serve(pprofLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("pprof serve: %w", err)
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
+		if metricsSrv != nil {
+			shutdownHTTPServer(metricsSrv, a.logger, "metrics server")
+		}
+		if pprofSrv != nil {
+			shutdownHTTPServer(pprofSrv, a.logger, "pprof server")
+		}
 		server.GracefulStop()
 		return nil
 	case err := <-errCh:
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
+		if pprofSrv != nil {
+			_ = pprofSrv.Close()
+		}
 		server.Stop()
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 	raftconsensus "github.com/i-melnichenko/consensus-lab/internal/consensus/raft"
 	"github.com/i-melnichenko/consensus-lab/internal/kv"
+	obsmetrics "github.com/i-melnichenko/consensus-lab/internal/observability/metrics"
 	"github.com/i-melnichenko/consensus-lab/internal/service"
 	admingrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/admin"
 	raftgrpc "github.com/i-melnichenko/consensus-lab/internal/transport/grpc/raft"
@@ -45,6 +47,7 @@ func run() error {
 
 	peers, err := raftgrpc.DialPeers(
 		peerAddrs,
+		otel.Tracer("consensus-lab/internal/transport/grpc/raft"),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
@@ -52,10 +55,22 @@ func run() error {
 	}
 
 	applyCh := make(chan consensus.ApplyMsg, 256)
-	store := kv.NewStore()
+	store := kv.NewStore(otel.Tracer("consensus-lab/internal/kv"))
 	storage := raftconsensus.NewJSONStorage(cfg.DataDir)
+	promMetrics, err := obsmetrics.NewPrometheus(nil)
+	if err != nil {
+		return err
+	}
 
-	node, err := raftconsensus.NewNode(cfg.NodeID, peers, applyCh, storage, logger)
+	node, err := raftconsensus.NewNode(
+		cfg.NodeID,
+		peers,
+		applyCh,
+		storage,
+		logger,
+		otel.Tracer("consensus-lab/internal/consensus/raft"),
+		promMetrics,
+	)
 	if err != nil {
 		for _, p := range peers {
 			_ = p.Close()
@@ -63,9 +78,9 @@ func run() error {
 		return err
 	}
 
-	kvSvc := service.NewKV(node, store, logger)
+	kvSvc := service.NewKV(node, store, logger, otel.Tracer("consensus-lab/internal/service/kv"), promMetrics, cfg.NodeID)
 	kvSvc.SnapshotEvery = cfg.SnapshotEvery
-	raftSrv := raftgrpc.NewServer(node)
+	raftSrv := raftgrpc.NewServer(node, otel.Tracer("consensus-lab/internal/transport/grpc/raft"))
 	adminSrv := admingrpc.NewServer(cfg.NodeID, string(cfg.ConsensusType), peerAddrs, node)
 
 	app, err := apppkg.New(cfg, logger, node, kvSvc, raftSrv, adminSrv)

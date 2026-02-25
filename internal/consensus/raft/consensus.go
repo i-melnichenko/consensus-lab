@@ -2,6 +2,7 @@ package raft
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 )
@@ -34,6 +35,7 @@ func (n *Node) StartCommand(cmd []byte) (index int64, isLeader bool) {
 	}
 
 	index = n.lastLogIndexLocked()
+	n.recordStartSeenLocked(index, time.Now())
 	n.matchIndex[n.id] = index
 	n.nextIndex[n.id] = index + 1
 

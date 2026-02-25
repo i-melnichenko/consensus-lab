@@ -204,7 +204,7 @@ func TestNewNode_NormalizesPeersByDroppingSelf(t *testing.T) {
 		"n1": nil, // should be ignored
 		"n2": nil,
 		"n3": nil,
-	}, make(chan consensus.ApplyMsg, 1), NewInMemoryStorage(), slog.Default())
+	}, make(chan consensus.ApplyMsg, 1), NewInMemoryStorage(), slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
@@ -227,6 +227,8 @@ func TestNewNode_ReturnsErrorOnNilLogger(t *testing.T) {
 		make(chan consensus.ApplyMsg, 1),
 		NewInMemoryStorage(),
 		nil,
+		testTracer,
+		testMetrics,
 	)
 	if !errors.Is(err, ErrNilLogger) {
 		t.Fatalf("expected ErrNilLogger, got %v", err)
@@ -313,7 +315,7 @@ func TestNode_Start_RollsBackOnPersistAppendError(t *testing.T) {
 	storageErr := errors.New("append failed")
 	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), &failingStorage{
 		appendLogErr: storageErr,
-	}, slog.Default())
+	}, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
@@ -349,7 +351,7 @@ func TestNode_HandleRequestVote_ReturnsErrorOnPersistHardStateFailure(t *testing
 	storageErr := errors.New("save hard state failed")
 	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), &failingStorage{
 		saveHardStateErr: storageErr,
-	}, slog.Default())
+	}, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
@@ -382,7 +384,7 @@ func TestNode_HandleAppendEntries_ReturnsErrorOnPersistAppendFailure(t *testing.
 	storageErr := errors.New("append failed")
 	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), &failingStorage{
 		appendLogErr: storageErr,
-	}, slog.Default())
+	}, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
@@ -417,7 +419,7 @@ func TestNode_sendAppendEntries_StepDownPersistFailureSetsDegradedStatus(t *test
 	storageErr := errors.New("save hard state failed")
 	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), &failingStorage{
 		saveHardStateErr: storageErr,
-	}, slog.Default())
+	}, slog.Default(), testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}
@@ -449,7 +451,7 @@ func TestNode_runCandidate_PersistFailureSetsDegradedStatus(t *testing.T) {
 	recLogger := &recordingLogger{}
 	n, err := NewNode("n1", map[string]PeerClient{}, make(chan consensus.ApplyMsg, 1), &failingStorage{
 		saveHardStateErr: storageErr,
-	}, recLogger)
+	}, recLogger, testTracer, testMetrics)
 	if err != nil {
 		t.Fatalf("NewNode() error = %v", err)
 	}

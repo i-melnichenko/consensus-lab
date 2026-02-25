@@ -1,0 +1,12 @@
+# noinspection YAMLSchemaValidation
+apiVersion: 1
+
+providers:
+  - name: consensus-lab
+    orgId: 1
+    folder: Consensus Lab
+    type: file
+    disableDeletion: false
+    editable: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

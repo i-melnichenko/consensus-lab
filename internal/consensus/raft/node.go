@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	"github.com/i-melnichenko/consensus-lab/internal/consensus"
 )
 
@@ -46,6 +48,8 @@ type Node struct {
 	commitIndex   int64
 	lastApplied   int64
 	lastAppliedAt time.Time
+	startSeenAt   map[int64]time.Time
+	commitSeenAt  map[int64]time.Time
 
 	// config is the active cluster configuration (source of quorum).
 	// In the current implementation it is static at runtime and restored from
@@ -63,6 +67,8 @@ type Node struct {
 
 	applyCh chan consensus.ApplyMsg
 	logger  Logger
+	tracer  oteltrace.Tracer
+	metrics Metrics
 
 	newTimer          timerFactory
 	newTicker         tickerFactory
@@ -81,12 +87,17 @@ func NewNode(
 	applyCh chan consensus.ApplyMsg,
 	storage Storage,
 	logger Logger,
+	tracer oteltrace.Tracer,
+	metrics Metrics,
 ) (*Node, error) {
 	if storage == nil {
 		return nil, ErrNilStorage
 	}
 	if logger == nil {
 		return nil, ErrNilLogger
+	}
+	if metrics == nil {
+		metrics = noopMetrics{}
 	}
 
 	normalizedPeers := normalizePeers(id, peers)
@@ -97,6 +108,8 @@ func NewNode(
 		storage:                storage,
 		role:                   Follower,
 		log:                    make([]LogEntry, 0),
+		startSeenAt:            make(map[int64]time.Time),
+		commitSeenAt:           make(map[int64]time.Time),
 		nextIndex:              make(map[string]int64),
 		matchIndex:             make(map[string]int64),
 		replicateInFlight:      make(map[string]bool),
@@ -106,11 +119,14 @@ func NewNode(
 		replicateNotifyCh:      make(chan struct{}, 1),
 		applyCh:                applyCh,
 		logger:                 logger,
+		tracer:                 tracer,
+		metrics:                metrics,
 		newTimer:               defaultTimerFactory,
 		newTicker:              defaultTickerFactory,
 		electionTimeoutFn:      randomElectionTimeout,
 		heartbeatInterval:      50 * time.Millisecond,
 	}
+	n.metrics.SetRaftIsLeader(n.id, false)
 
 	ps, err := storage.Load()
 	if err != nil {
@@ -201,6 +217,9 @@ func (n *Node) Run(ctx context.Context) {
 
 func (n *Node) run(ctx context.Context) {
 	for {
+		n.mu.Lock()
+		n.metrics.SetRaftIsLeader(n.id, n.role == Leader)
+		n.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
@@ -327,19 +346,27 @@ func (n *Node) persistHardStateLocked() error {
 	if n.storage == nil {
 		return nil
 	}
-	return n.storage.SaveHardState(HardState{
+	err := n.storage.SaveHardState(HardState{
 		CurrentTerm: n.currentTerm,
 		VotedFor:    n.votedFor,
 		CommitIndex: n.commitIndex,
 		Config:      n.config,
 	})
+	if err != nil {
+		n.metrics.IncRaftStorageError(n.id, "save_hard_state")
+	}
+	return err
 }
 
 func (n *Node) persistAppendLogLocked(entries []LogEntry) error {
 	if n.storage == nil {
 		return nil
 	}
-	return n.storage.AppendLog(entries)
+	err := n.storage.AppendLog(entries)
+	if err != nil {
+		n.metrics.IncRaftStorageError(n.id, "append_log")
+	}
+	return err
 }
 
 // persistTruncateLogLocked keeps entries with Raft index in (snapshotIndex, fromIndex).
@@ -352,14 +379,22 @@ func (n *Node) persistTruncateLogLocked(fromIndex int64) error {
 	if keepN < 0 {
 		keepN = 0
 	}
-	return n.storage.TruncateLog(keepN)
+	err := n.storage.TruncateLog(keepN)
+	if err != nil {
+		n.metrics.IncRaftStorageError(n.id, "truncate_log")
+	}
+	return err
 }
 
 func (n *Node) persistSnapshotLocked(snap Snapshot) error {
 	if n.storage == nil {
 		return nil
 	}
-	return n.storage.SaveSnapshot(snap)
+	err := n.storage.SaveSnapshot(snap)
+	if err != nil {
+		n.metrics.IncRaftStorageError(n.id, "save_snapshot")
+	}
+	return err
 }
 
 // persistCompactLogLocked atomically replaces the stored log with the post-snapshot entries.
@@ -368,7 +403,11 @@ func (n *Node) persistCompactLogLocked() error {
 	if n.storage == nil {
 		return nil
 	}
-	return n.storage.SetLog(n.snapshotIndex, n.log)
+	err := n.storage.SetLog(n.snapshotIndex, n.log)
+	if err != nil {
+		n.metrics.IncRaftStorageError(n.id, "set_log")
+	}
+	return err
 }
 
 func cloneLogEntries(src []LogEntry) []LogEntry {

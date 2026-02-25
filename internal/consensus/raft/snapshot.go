@@ -1,6 +1,11 @@
 package raft
 
-import "context"
+import (
+	"context"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+)
 
 // applySnapshotLocked updates node state to reflect the installed snapshot.
 // Caller must hold n.mu.
@@ -83,6 +88,17 @@ func (n *Node) sendInstallSnapshot(
 	peerClient PeerClient,
 	req *InstallSnapshotRequest,
 ) {
+	ctx, span := n.startSpan(
+		ctx,
+		"raft.node.sendInstallSnapshot",
+		attribute.String("raft.peer_id", peerID),
+		attribute.Int64("raft.term", req.Term),
+		attribute.Int64("raft.snapshot.index", req.LastIncludedIndex),
+		attribute.Int64("raft.snapshot.term", req.LastIncludedTerm),
+		attribute.Int("raft.snapshot.bytes", len(req.Data)),
+	)
+	defer span.End()
+
 	n.logger.Debug("sending InstallSnapshot",
 		"node_id", n.id,
 		"peer", peerID,
@@ -90,6 +106,7 @@ func (n *Node) sendInstallSnapshot(
 		"snapshot_index", req.LastIncludedIndex,
 		"snapshot_term", req.LastIncludedTerm,
 	)
+	n.metrics.ObserveRaftInstallSnapshotSendBytes(n.id, peerID, len(req.Data))
 
 	defer func() {
 		n.mu.Lock()
@@ -103,9 +120,17 @@ func (n *Node) sendInstallSnapshot(
 		}
 	}()
 
+	rpcStart := time.Now()
 	resp, err := peerClient.InstallSnapshot(ctx, req)
+	n.metrics.ObserveRaftInstallSnapshotRPCDuration(n.id, peerID, time.Since(rpcStart))
 	if err != nil || resp == nil {
 		if err != nil {
+			n.metrics.IncRaftInstallSnapshotSend(n.id, peerID, "rpc_error")
+		} else {
+			n.metrics.IncRaftInstallSnapshotSend(n.id, peerID, "nil_response")
+		}
+		if err != nil {
+			spanRecordError(span, err)
 			n.logger.Debug("InstallSnapshot RPC failed",
 				"node_id", n.id,
 				"peer", peerID,
@@ -115,15 +140,17 @@ func (n *Node) sendInstallSnapshot(
 		}
 		return
 	}
+	span.SetAttributes(attribute.Int64("raft.response_term", resp.Term))
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if resp.Term > n.currentTerm {
+		n.metrics.IncRaftInstallSnapshotSend(n.id, peerID, "higher_term")
 		n.currentTerm = resp.Term
 		n.votedFor = ""
 		n.role = Follower
-		if err := n.persistHardStateLocked(); err != nil {
+		if err := n.tracePersistHardStateLocked(ctx, "leader_step_down_higher_term_install_snapshot_response"); err != nil {
 			n.markDegradedLocked(err)
 		}
 		return
@@ -140,6 +167,7 @@ func (n *Node) sendInstallSnapshot(
 		"snapshot_term", req.LastIncludedTerm,
 		"peer_term", resp.Term,
 	)
+	n.metrics.IncRaftInstallSnapshotSend(n.id, peerID, "ok")
 
 	// Advance peer progress past the snapshot.
 	if req.LastIncludedIndex > n.matchIndex[peerID] {
